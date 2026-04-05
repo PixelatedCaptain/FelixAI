@@ -9,9 +9,12 @@ export class StateStore {
   private readonly logger: JobLogger;
   private readonly pendingWrites = new Map<string, Promise<void>>();
   private readonly jobsDirPath: string;
+  private readonly plansDirPath: string;
 
   constructor(projectRoot: string, options: { stateDir: string; logDir: string }) {
-    this.jobsDirPath = path.join(path.resolve(projectRoot), options.stateDir, "jobs");
+    const stateRoot = path.join(path.resolve(projectRoot), options.stateDir);
+    this.jobsDirPath = path.join(stateRoot, "jobs");
+    this.plansDirPath = path.join(stateRoot, "plans");
     this.logger = new JobLogger(path.resolve(projectRoot, options.logDir));
   }
 
@@ -21,11 +24,16 @@ export class StateStore {
 
   async ensure(): Promise<void> {
     await ensureDirectory(this.jobsDir);
+    await ensureDirectory(this.plansDirPath);
     await this.logger.ensure();
   }
 
   getJobPath(jobId: string): string {
     return path.join(this.jobsDir, `${jobId}.json`);
+  }
+
+  getPlanPath(jobId: string): string {
+    return path.join(this.plansDirPath, `${jobId}.plan.json`);
   }
 
   async saveJob(job: JobState): Promise<void> {
@@ -53,6 +61,11 @@ export class StateStore {
     const files = await listJsonFiles(this.jobsDir);
     const jobs = await Promise.all(files.map(async (file) => validateJobState(migrateJobState(await readJsonFile<unknown>(file)))));
     return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async savePlan(jobId: string, value: unknown): Promise<void> {
+    await this.ensure();
+    await writeJsonFile(this.getPlanPath(jobId), value);
   }
 
   private async mergeWithCurrent(incoming: JobState): Promise<JobState> {

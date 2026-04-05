@@ -7,6 +7,7 @@ import packageJson from "../package.json" with { type: "json" };
 import { loadConfig } from "./config.js";
 import { initializeProject } from "./init.js";
 import { createJobManager } from "./job-manager.js";
+import type { JobState } from "./types.js";
 import { readTaskFromJson } from "./validation.js";
 
 function printUsage(): void {
@@ -17,9 +18,9 @@ Usage:
   felixai config show
   felixai version
   felixai job start --repo <path> (--task "<large task>" | --task-file <file>) [--base-branch <branch>] [--parallel <n>] [--auto-resume] [--require-clean]
-  felixai job status <job-id>
+  felixai job status <job-id> [--json]
   felixai job resume <job-id>
-  felixai job list
+  felixai job list [--json]
 
 Examples:
   felixai init
@@ -62,6 +63,28 @@ function parseInteger(value: string | undefined): number | undefined {
   }
 
   return parsed;
+}
+
+function summarizeJob(job: JobState): {
+  pending: number;
+  running: number;
+  boundary: number;
+  completed: number;
+  failed: number;
+} {
+  return job.workItems.reduce(
+    (summary, item) => {
+      summary[item.status] += 1;
+      return summary;
+    },
+    {
+      pending: 0,
+      running: 0,
+      boundary: 0,
+      completed: 0,
+      failed: 0
+    }
+  );
 }
 
 async function main(): Promise<void> {
@@ -139,13 +162,37 @@ async function main(): Promise<void> {
         case "status": {
           const jobId = requireValue(jobArgs[0], "Missing job id.");
           const job = await manager.getJob(jobId);
+          if (hasFlag(jobArgs, "--json")) {
+            console.log(JSON.stringify(job, null, 2));
+            return;
+          }
+
+          const summary = summarizeJob(job);
           console.log(`[felixai] job ${job.jobId}`);
           console.log(`[felixai] status: ${job.status}`);
           console.log(`[felixai] repo: ${job.repoRoot}`);
           console.log(`[felixai] base branch: ${job.baseBranch}`);
           console.log(`[felixai] planning summary: ${job.planningSummary ?? "n/a"}`);
+          console.log(
+            `[felixai] work items: pending=${summary.pending} running=${summary.running} boundary=${summary.boundary} completed=${summary.completed} failed=${summary.failed}`
+          );
           for (const item of job.workItems) {
-            console.log(`[felixai] ${item.id}: ${item.status} (${item.branchName ?? "branch-pending"})`);
+            const session = job.sessions.find((entry) => entry.workItemId === item.id);
+            const details = [
+              `branch=${item.branchName ?? "branch-pending"}`,
+              `session=${session?.sessionId ?? item.sessionId ?? "session-pending"}`,
+              `attempts=${item.attempts}`
+            ].join(" ");
+            console.log(`[felixai] ${item.id}: ${item.status} ${details}`);
+          }
+          const recentEvents = job.events.slice(-5);
+          if (recentEvents.length > 0) {
+            console.log("[felixai] recent events:");
+            for (const event of recentEvents) {
+              console.log(
+                `[felixai] ${event.timestamp} ${event.level} ${event.scope}${event.workItemId ? `:${event.workItemId}` : ""} ${event.message}`
+              );
+            }
           }
           return;
         }
@@ -157,8 +204,15 @@ async function main(): Promise<void> {
         }
         case "list": {
           const jobs = await manager.listJobs();
+          if (hasFlag(jobArgs, "--json")) {
+            console.log(JSON.stringify(jobs, null, 2));
+            return;
+          }
           for (const job of jobs) {
-            console.log(`${job.jobId}  ${job.status}  ${job.baseBranch}  ${job.task}`);
+            const summary = summarizeJob(job);
+            console.log(
+              `${job.jobId}  ${job.status}  branch=${job.baseBranch}  done=${summary.completed}/${job.workItems.length}  running=${summary.running}  failed=${summary.failed}  ${job.task}`
+            );
           }
           return;
         }

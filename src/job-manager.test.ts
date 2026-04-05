@@ -94,6 +94,7 @@ async function testPlannerAndExecutionFlow(): Promise<void> {
   assert.equal(job.workItems.filter((item) => item.status === "completed").length, 2);
   assert.ok(job.workItems.every((item) => item.branchName?.startsWith("agent/")));
   assert.ok(await pathExists(job.workItems[0].workspacePath as string));
+  assert.ok(await pathExists(path.join(root, ".felixai", "state", "plans", `${job.jobId}.plan.json`)));
   assert.ok(await pathExists(path.join(root, ".felixai", "logs", "jobs", `${job.jobId}.events.jsonl`)));
   assert.ok(await pathExists(path.join(root, ".felixai", "logs", "jobs", `${job.jobId}.summary.json`)));
 }

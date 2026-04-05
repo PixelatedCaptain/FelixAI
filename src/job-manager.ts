@@ -107,6 +107,19 @@ function eligibleItems(job: JobState, includeBoundary: boolean): WorkItemState[]
   });
 }
 
+function blockedItems(job: JobState, includeBoundary: boolean): WorkItemState[] {
+  const eligibleIds = new Set(eligibleItems(job, includeBoundary).map((item) => item.id));
+  return job.workItems.filter((item) => {
+    if (item.status === "completed" || item.status === "running" || item.status === "failed") {
+      return false;
+    }
+    if (eligibleIds.has(item.id)) {
+      return false;
+    }
+    return true;
+  });
+}
+
 function recalculateMergeReadiness(workItems: WorkItemState[]): JobState["mergeReadiness"] {
   return {
     completedBranches: workItems.filter((item) => item.status === "completed" && item.branchName).map((item) => item.branchName as string),
@@ -196,6 +209,14 @@ export class JobManager {
     await this.deps.store.saveJob(job);
 
     const plan = validatePlanResult(await this.deps.planner(request.task, repoRoot, baseBranch));
+    await this.deps.store.savePlan(job.jobId, {
+      jobId: job.jobId,
+      repoRoot,
+      baseBranch,
+      task: request.task,
+      createdAt: now(),
+      plan
+    });
     if (plan.workItems.length === 0) {
       throw new Error("Planner returned no work items.");
     }
@@ -234,12 +255,27 @@ export class JobManager {
 
     while (true) {
       const ready = eligibleItems(job, includeBoundary).slice(0, job.parallelism);
+      const blocked = blockedItems(job, includeBoundary);
       if (ready.length === 0) {
+        if (blocked.length > 0) {
+          job = addEvent(
+            job,
+            "info",
+            "job",
+            `No runnable work items yet. Waiting on dependencies for: ${blocked.map((item) => item.id).join(", ")}`
+          );
+        }
         job.status = deriveJobStatus(job);
         await this.deps.store.saveJob(job);
         return job;
       }
 
+      job = addEvent(
+        job,
+        "info",
+        "job",
+        `Dispatching ${ready.length} work item(s): ${ready.map((item) => item.id).join(", ")}`
+      );
       job.status = "running";
       await this.deps.store.saveJob(job);
 

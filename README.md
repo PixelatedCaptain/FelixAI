@@ -62,7 +62,9 @@ felixai job start --repo . --task "Build the first milestone"
 felixai job start --repo . --task-file ./felixai.task.json
 felixai job start --repo . --task "Refactor auth" --require-clean
 felixai job status <job-id>
+felixai job status <job-id> --json
 felixai job list
+felixai job list --json
 felixai job resume <job-id>
 ```
 
@@ -71,6 +73,7 @@ felixai job resume <job-id>
 FelixAI persists:
 
 - job state under `.felixai/state/jobs`
+- normalized planner artifacts under `.felixai/state/plans`
 - per-job event logs under `.felixai/logs/jobs/*.events.jsonl`
 - per-job log summaries under `.felixai/logs/jobs/*.summary.json`
 
