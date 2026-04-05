@@ -1,4 +1,4 @@
-import { STATE_SCHEMA_VERSION, type FelixConfig, type JobState } from "./types.js";
+import { STATE_SCHEMA_VERSION, type FelixConfig, type JobState, type PlanResult, type PlannedWorkItem } from "./types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -161,4 +161,73 @@ export function readTaskFromJson(raw: unknown): string {
   assertRecord(raw, "Task file must contain a JSON object.");
   assertString(raw.task, "Task file must include a non-empty string task field.");
   return raw.task;
+}
+
+export function validatePlanResult(plan: PlanResult): PlanResult {
+  assertRecord(plan, "Planner output must be a JSON object.");
+  assertString(plan.summary, "Planner output must include a non-empty summary.");
+  if (!Array.isArray(plan.workItems) || plan.workItems.length === 0) {
+    throw new Error("Planner output must include a non-empty workItems array.");
+  }
+
+  const ids = new Set<string>();
+  for (const item of plan.workItems) {
+    validatePlannedWorkItem(item);
+    if (ids.has(item.id)) {
+      throw new Error(`Planner returned duplicate work item id '${item.id}'.`);
+    }
+    ids.add(item.id);
+  }
+
+  for (const item of plan.workItems) {
+    for (const dependency of item.dependsOn) {
+      if (!ids.has(dependency)) {
+        throw new Error(`Work item '${item.id}' depends on missing work item '${dependency}'.`);
+      }
+      if (dependency === item.id) {
+        throw new Error(`Work item '${item.id}' cannot depend on itself.`);
+      }
+    }
+  }
+
+  assertAcyclicPlan(plan.workItems);
+  return plan;
+}
+
+function validatePlannedWorkItem(item: PlannedWorkItem): void {
+  assertRecord(item, "Each planner work item must be an object.");
+  assertString(item.id, "Each planner work item must include id.");
+  assertString(item.title, "Each planner work item must include title.");
+  assertString(item.prompt, "Each planner work item must include prompt.");
+  assertStringArray(item.dependsOn, `Planner work item '${item.id}' dependsOn must be an array of strings.`);
+}
+
+function assertAcyclicPlan(workItems: PlannedWorkItem[]): void {
+  const byId = new Map(workItems.map((item) => [item.id, item]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+
+  function visit(id: string, trail: string[]): void {
+    if (visited.has(id)) {
+      return;
+    }
+    if (visiting.has(id)) {
+      throw new Error(`Planner returned a circular dependency: ${[...trail, id].join(" -> ")}`);
+    }
+
+    visiting.add(id);
+    const item = byId.get(id);
+    if (!item) {
+      return;
+    }
+    for (const dependency of item.dependsOn) {
+      visit(dependency, [...trail, id]);
+    }
+    visiting.delete(id);
+    visited.add(id);
+  }
+
+  for (const item of workItems) {
+    visit(item.id, []);
+  }
 }

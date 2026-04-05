@@ -18,6 +18,7 @@ import {
   type SessionState,
   type WorkItemState
 } from "./types.js";
+import { validatePlanResult } from "./validation.js";
 
 export interface JobManagerDependencies {
   planner: (task: string, repoRoot: string, baseBranch: string) => Promise<PlanResult>;
@@ -194,7 +195,7 @@ export class JobManager {
     }
     await this.deps.store.saveJob(job);
 
-    const plan = await this.deps.planner(request.task, repoRoot, baseBranch);
+    const plan = validatePlanResult(await this.deps.planner(request.task, repoRoot, baseBranch));
     if (plan.workItems.length === 0) {
       throw new Error("Planner returned no work items.");
     }

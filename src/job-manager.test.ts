@@ -244,6 +244,93 @@ async function testBaseBranchFailureBubblesClearly(): Promise<void> {
   );
 }
 
+async function testDuplicatePlanIdsFail(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-plan-dup-"));
+  await ensureFelixDirectories(root);
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "duplicate ids",
+      workItems: [
+        { id: "dup", title: "one", prompt: "one", dependsOn: [] },
+        { id: "dup", title: "two", prompt: "two", dependsOn: [] }
+      ]
+    }),
+    executor: async (): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: "ok"
+    })
+  });
+
+  await assert.rejects(manager.startJob({ repoPath: root, task: "dup ids" }), /duplicate work item id/i);
+}
+
+async function testMissingDependencyFails(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-plan-missing-"));
+  await ensureFelixDirectories(root);
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "missing dep",
+      workItems: [{ id: "a", title: "A", prompt: "A", dependsOn: ["missing"] }]
+    }),
+    executor: async (): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: "ok"
+    })
+  });
+
+  await assert.rejects(manager.startJob({ repoPath: root, task: "missing dep" }), /depends on missing work item/i);
+}
+
+async function testCircularDependencyFails(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-plan-cycle-"));
+  await ensureFelixDirectories(root);
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "cycle",
+      workItems: [
+        { id: "a", title: "A", prompt: "A", dependsOn: ["b"] },
+        { id: "b", title: "B", prompt: "B", dependsOn: ["a"] }
+      ]
+    }),
+    executor: async (): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: "ok"
+    })
+  });
+
+  await assert.rejects(manager.startJob({ repoPath: root, task: "cycle" }), /circular dependency/i);
+}
+
 async function main(): Promise<void> {
   await testInit();
   await testInvalidConfigFailsValidation();
@@ -252,6 +339,9 @@ async function main(): Promise<void> {
   await testInvalidStateFailsValidation();
   await testRequireCleanRejectsDirtyRepo();
   await testBaseBranchFailureBubblesClearly();
+  await testDuplicatePlanIdsFail();
+  await testMissingDependencyFails();
+  await testCircularDependencyFails();
   console.log("job manager tests passed");
 }
 
