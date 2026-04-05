@@ -176,6 +176,17 @@ async function main(): Promise<void> {
           console.log(
             `[felixai] work items: pending=${summary.pending} running=${summary.running} boundary=${summary.boundary} completed=${summary.completed} failed=${summary.failed}`
           );
+          if (job.mergeReadiness.branchReadiness.length > 0) {
+            console.log(
+              `[felixai] merge readiness: completed=${job.mergeReadiness.completedBranches.length} pending=${job.mergeReadiness.pendingBranches.length}`
+            );
+            for (const branch of job.mergeReadiness.branchReadiness) {
+              const conflicts = branch.conflictWith.length > 0 ? branch.conflictWith.join(",") : "none";
+              console.log(
+                `[felixai] merge ${branch.workItemId}: branch=${branch.branchName} files=${branch.changedFiles.length} conflicts=${conflicts}`
+              );
+            }
+          }
           for (const item of job.workItems) {
             const session = job.sessions.find((entry) => entry.workItemId === item.id);
             const details = [

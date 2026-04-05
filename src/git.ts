@@ -59,3 +59,15 @@ export async function createWorktree(repoPath: string, workspacePath: string, br
 
   await runCommand("git", ["-C", repoPath, "worktree", "add", "-b", branchName, workspacePath, baseBranch]);
 }
+
+export async function listChangedFiles(repoPath: string, baseBranch: string, branchName: string): Promise<string[]> {
+  const result = await runCommand("git", ["-C", repoPath, "diff", "--name-only", `${baseBranch}...${branchName}`]);
+  if (!result.stdout) {
+    return [];
+  }
+
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}

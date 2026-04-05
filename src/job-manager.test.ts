@@ -332,6 +332,63 @@ async function testCircularDependencyFails(): Promise<void> {
   await assert.rejects(manager.startJob({ repoPath: root, task: "cycle" }), /circular dependency/i);
 }
 
+async function testMergeReadinessIsPersisted(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-merge-"));
+  await ensureFelixDirectories(root);
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store,
+    analyzeMergeReadiness: async (job) => ({
+      completedBranches: ["agent/a/job-12345678", "agent/b/job-12345678"],
+      pendingBranches: [],
+      branchReadiness: [
+        {
+          workItemId: "a",
+          branchName: "agent/a/job-12345678",
+          changedFiles: ["src/shared.ts"],
+          conflictWith: ["agent/b/job-12345678"]
+        },
+        {
+          workItemId: "b",
+          branchName: "agent/b/job-12345678",
+          changedFiles: ["src/shared.ts", "src/feature.ts"],
+          conflictWith: ["agent/a/job-12345678"]
+        }
+      ],
+      generatedAt: new Date().toISOString()
+    }),
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "merge readiness",
+      workItems: [
+        { id: "a", title: "A", prompt: "A", dependsOn: [] },
+        { id: "b", title: "B", prompt: "B", dependsOn: [] }
+      ]
+    }),
+    executor: async ({ workspacePath }): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: workspacePath,
+      sessionId: `session-${path.basename(workspacePath)}`
+    })
+  });
+
+  const job = await manager.startJob({
+    repoPath: root,
+    task: "merge readiness"
+  });
+
+  assert.equal(job.mergeReadiness.branchReadiness.length, 2);
+  assert.equal(job.mergeReadiness.branchReadiness[0].conflictWith.length > 0, true);
+}
+
 async function main(): Promise<void> {
   await testInit();
   await testInvalidConfigFailsValidation();
@@ -343,6 +400,7 @@ async function main(): Promise<void> {
   await testDuplicatePlanIdsFail();
   await testMissingDependencyFails();
   await testCircularDependencyFails();
+  await testMergeReadinessIsPersisted();
   console.log("job manager tests passed");
 }
 

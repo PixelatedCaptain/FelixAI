@@ -185,7 +185,10 @@ function mergeJobStates(current: JobState, incoming: JobState): JobState {
     events: mergeEvents(current.events, incoming.events),
     mergeReadiness: {
       completedBranches: workItems.filter((item) => item.status === "completed" && item.branchName).map((item) => item.branchName as string),
-      pendingBranches: workItems.filter((item) => item.status !== "completed" && item.branchName).map((item) => item.branchName as string)
+      pendingBranches: workItems.filter((item) => item.status !== "completed" && item.branchName).map((item) => item.branchName as string),
+      branchReadiness:
+        incoming.mergeReadiness.branchReadiness.length > 0 ? incoming.mergeReadiness.branchReadiness : current.mergeReadiness.branchReadiness,
+      generatedAt: incoming.mergeReadiness.generatedAt ?? current.mergeReadiness.generatedAt
     },
     updatedAt: incoming.updatedAt > current.updatedAt ? incoming.updatedAt : current.updatedAt,
     status: deriveStatus({

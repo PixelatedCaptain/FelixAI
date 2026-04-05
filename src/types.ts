@@ -84,9 +84,18 @@ export interface JobEvent {
   message: string;
 }
 
+export interface BranchReadiness {
+  workItemId: string;
+  branchName: string;
+  changedFiles: string[];
+  conflictWith: string[];
+}
+
 export interface MergeReadiness {
   completedBranches: string[];
   pendingBranches: string[];
+  branchReadiness: BranchReadiness[];
+  generatedAt?: string;
 }
 
 export interface JobState {

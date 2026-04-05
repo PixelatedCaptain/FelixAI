@@ -77,6 +77,8 @@ FelixAI persists:
 - per-job event logs under `.felixai/logs/jobs/*.events.jsonl`
 - per-job log summaries under `.felixai/logs/jobs/*.summary.json`
 
+`job status` also surfaces merge-readiness hints for completed branches, including likely overlaps in changed files.
+
 ## Repo policy
 
 FelixAI validates that the target path is a Git repository and that the selected base branch exists.

@@ -125,6 +125,16 @@ export function validateJobState(job: JobState): JobState {
   assertRecord(job.mergeReadiness, "Job state mergeReadiness must be an object.");
   assertStringArray(job.mergeReadiness.completedBranches, "Job state completedBranches must be an array of strings.");
   assertStringArray(job.mergeReadiness.pendingBranches, "Job state pendingBranches must be an array of strings.");
+  if (!Array.isArray(job.mergeReadiness.branchReadiness)) {
+    throw new Error("Job state branchReadiness must be an array.");
+  }
+  for (const branch of job.mergeReadiness.branchReadiness) {
+    assertRecord(branch, "Each branch readiness entry must be an object.");
+    assertString(branch.workItemId, "Each branch readiness entry must include workItemId.");
+    assertString(branch.branchName, "Each branch readiness entry must include branchName.");
+    assertStringArray(branch.changedFiles, "Each branch readiness changedFiles value must be an array of strings.");
+    assertStringArray(branch.conflictWith, "Each branch readiness conflictWith value must be an array of strings.");
+  }
   assertString(job.createdAt, "Job state createdAt must be a non-empty string.");
   assertString(job.updatedAt, "Job state updatedAt must be a non-empty string.");
 

@@ -2,11 +2,12 @@ import crypto from "node:crypto";
 import path from "node:path";
 
 import { loadConfig } from "./config.js";
-import { assertGitRepository, baseBranchExists, getCurrentBranch, isWorkingTreeDirty, resolveGitRoot } from "./git.js";
+import { assertGitRepository, baseBranchExists, getCurrentBranch, isWorkingTreeDirty, listChangedFiles, resolveGitRoot } from "./git.js";
 import { StateStore } from "./state-store.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import {
+  type BranchReadiness,
   STATE_SCHEMA_VERSION,
   type ExecutionResult,
   type FelixConfig,
@@ -31,6 +32,7 @@ export interface JobManagerDependencies {
   workspaceManager: Pick<WorkspaceManager, "ensureWorkspace">;
   store: StateStore;
   config: FelixConfig;
+  analyzeMergeReadiness?: (job: JobState) => Promise<JobState["mergeReadiness"]>;
   resolveRepoContext: (
     repoPath: string,
     requestedBaseBranch?: string,
@@ -123,7 +125,9 @@ function blockedItems(job: JobState, includeBoundary: boolean): WorkItemState[] 
 function recalculateMergeReadiness(workItems: WorkItemState[]): JobState["mergeReadiness"] {
   return {
     completedBranches: workItems.filter((item) => item.status === "completed" && item.branchName).map((item) => item.branchName as string),
-    pendingBranches: workItems.filter((item) => item.status !== "completed" && item.branchName).map((item) => item.branchName as string)
+    pendingBranches: workItems.filter((item) => item.status !== "completed" && item.branchName).map((item) => item.branchName as string),
+    branchReadiness: [],
+    generatedAt: undefined
   };
 }
 
@@ -150,6 +154,36 @@ export async function createJobManager(projectRoot = process.cwd(), overrides?: 
     workspaceManager,
     store,
     config,
+    analyzeMergeReadiness:
+      overrides?.analyzeMergeReadiness ??
+      (async (job) => {
+        const completed = job.workItems.filter((item) => item.status === "completed" && item.branchName);
+        const branchReadiness: BranchReadiness[] = [];
+
+        for (const item of completed) {
+          const changedFiles = await listChangedFiles(job.repoRoot, job.baseBranch, item.branchName as string);
+          branchReadiness.push({
+            workItemId: item.id,
+            branchName: item.branchName as string,
+            changedFiles,
+            conflictWith: []
+          });
+        }
+
+        for (const branch of branchReadiness) {
+          branch.conflictWith = branchReadiness
+            .filter((candidate) => candidate.branchName !== branch.branchName)
+            .filter((candidate) => candidate.changedFiles.some((file) => branch.changedFiles.includes(file)))
+            .map((candidate) => candidate.branchName);
+        }
+
+        return {
+          completedBranches: completed.map((item) => item.branchName as string),
+          pendingBranches: job.workItems.filter((item) => item.status !== "completed" && item.branchName).map((item) => item.branchName as string),
+          branchReadiness,
+          generatedAt: now()
+        };
+      }),
     resolveRepoContext:
       overrides?.resolveRepoContext ??
       (async (repoPath, requestedBaseBranch, options) => {
@@ -196,7 +230,8 @@ export class JobManager {
       events: [],
       mergeReadiness: {
         completedBranches: [],
-        pendingBranches: []
+        pendingBranches: [],
+        branchReadiness: []
       },
       createdAt,
       updatedAt: createdAt
@@ -257,6 +292,10 @@ export class JobManager {
       const ready = eligibleItems(job, includeBoundary).slice(0, job.parallelism);
       const blocked = blockedItems(job, includeBoundary);
       if (ready.length === 0) {
+        job.mergeReadiness = await this.getMergeReadiness(job);
+        if (job.mergeReadiness.branchReadiness.some((entry) => entry.conflictWith.length > 0)) {
+          job = addEvent(job, "warn", "job", "Merge readiness detected overlapping branch file changes that may conflict.");
+        }
         if (blocked.length > 0) {
           job = addEvent(
             job,
@@ -283,6 +322,44 @@ export class JobManager {
       job = await this.deps.store.loadJob(jobId);
       includeBoundary = job.autoResume;
     }
+  }
+
+  private async getMergeReadiness(job: JobState): Promise<JobState["mergeReadiness"]> {
+    if (this.deps.analyzeMergeReadiness) {
+      return this.deps.analyzeMergeReadiness(job);
+    }
+
+    const completed = job.workItems.filter((item) => item.status === "completed" && item.branchName);
+    const branchReadiness: BranchReadiness[] = [];
+
+    for (const item of completed) {
+      let changedFiles: string[] = [];
+      try {
+        changedFiles = await listChangedFiles(job.repoRoot, job.baseBranch, item.branchName as string);
+      } catch {
+        changedFiles = [];
+      }
+      branchReadiness.push({
+        workItemId: item.id,
+        branchName: item.branchName as string,
+        changedFiles,
+        conflictWith: []
+      });
+    }
+
+    for (const branch of branchReadiness) {
+      branch.conflictWith = branchReadiness
+        .filter((candidate) => candidate.branchName !== branch.branchName)
+        .filter((candidate) => candidate.changedFiles.some((file) => branch.changedFiles.includes(file)))
+        .map((candidate) => candidate.branchName);
+    }
+
+    return {
+      completedBranches: completed.map((item) => item.branchName as string),
+      pendingBranches: job.workItems.filter((item) => item.status !== "completed" && item.branchName).map((item) => item.branchName as string),
+      branchReadiness,
+      generatedAt: now()
+    };
   }
 
   private async executeSingleItem(jobId: string, workItemId: string): Promise<JobState> {
