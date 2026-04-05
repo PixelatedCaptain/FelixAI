@@ -1,0 +1,105 @@
+# FelixAI Orchestrator App Plan
+
+## Product definition
+
+FelixAI Orchestrator is a locally installed CLI-driven orchestration engine that coordinates multiple Codex CLI sessions to complete large software engineering tasks in parallel. It is intentionally separate from any relay, dashboard, or remote UI.
+
+## Scope
+
+### In scope
+
+- Local CLI commands
+- High-level task intake
+- Codex-driven task decomposition
+- Isolated repo workspaces per session
+- Short-lived branch creation per work item
+- Session lifecycle tracking
+- State persistence and recovery
+- Boundary-aware auto-resume or manual resume
+- Merge-readiness tracking
+
+### Out of scope
+
+- Relay
+- Dashboards
+- Mobile access
+- Team auth
+- Shared Codex account coordination for multiple users
+- Public APIs
+- Dev/test/prod promotion governance
+
+## MVP milestones
+
+### Milestone 1: foundation
+
+- local installable CLI
+- config file and directories
+- versioned state model
+- basic logging
+
+### Milestone 2: repo orchestration
+
+- Git repo validation
+- isolated workspace creation
+- temporary branch naming
+- base branch selection
+
+### Milestone 3: planning
+
+- send large task to Codex planner
+- receive structured work items
+- normalize dependencies
+
+### Milestone 4: execution
+
+- launch multiple Codex sessions
+- track session and work-item state
+- expose job status locally
+
+### Milestone 5: resume
+
+- classify completion vs boundary vs failure
+- auto-resume support
+- manual resume command
+
+### Milestone 6: merge readiness
+
+- track completed branches
+- highlight conflicts or pending review
+- generate merge-ready summaries
+
+### Milestone 7: hardening
+
+- stronger validation
+- config migration strategy
+- error classification
+- packaging polish
+
+## Current implementation status
+
+- `init`: implemented
+- `job start`: implemented
+- `job status`: implemented
+- `job list`: implemented
+- `job resume`: implemented
+- structured state store: implemented
+- workspace isolation with Git worktrees: implemented
+- Codex planner/executor adapter: implemented
+- merge automation: not yet implemented
+- conflict resolution workflow: not yet implemented
+
+## Design constraints
+
+- FelixAI orchestrates; Codex plans and executes
+- each work item gets its own workspace and branch
+- state must survive process restarts
+- relay requirements must not leak into this repo
+- FelixAI must use one explicit Codex credential source per installation with no ambient fallback ambiguity
+
+## Relay boundary
+
+- Team access, identity, and remote control belong to the separate relay project.
+- FelixAI should not implement shared-account logic for multiple users.
+- FelixAI runs with the Codex credentials configured for that local installation or host.
+- The relay should own user authentication, authorization, attribution, and request routing.
+- FelixAI should persist enough metadata that a relay can later record who requested a job and why.
