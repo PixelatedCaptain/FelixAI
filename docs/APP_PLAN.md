@@ -88,6 +88,10 @@ FelixAI Orchestrator is a locally installed CLI-driven orchestration engine that
 - merge automation: not yet implemented
 - conflict resolution workflow: not yet implemented
 
+## Delivery tracking
+
+- Detailed milestone and issue breakdown: [DELIVERY_PLAN.md](./DELIVERY_PLAN.md)
+
 ## Design constraints
 
 - FelixAI orchestrates; Codex plans and executes
