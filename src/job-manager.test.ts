@@ -3,8 +3,8 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { DEFAULT_CONFIG, ensureFelixDirectories } from "./config.js";
-import { pathExists, readJsonFile } from "./fs-utils.js";
+import { DEFAULT_CONFIG, ensureFelixDirectories, loadConfig } from "./config.js";
+import { pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
 import { initializeProject } from "./init.js";
 import { JobManager } from "./job-manager.js";
 import { StateStore } from "./state-store.js";
@@ -28,6 +28,21 @@ async function testInit(): Promise<void> {
   assert.ok(await pathExists(path.join(root, ".felixai", "workspaces")));
 }
 
+async function testInvalidConfigFailsValidation(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-config-"));
+  await ensureFelixDirectories(root);
+  await writeJsonFile(path.join(root, ".felixai", "config.json"), {
+    schemaVersion: 1,
+    stateDir: ".felixai/state",
+    workspaceRoot: ".felixai/workspaces",
+    logDir: ".felixai/logs",
+    credentialSource: "not-valid",
+    codex: DEFAULT_CONFIG.codex
+  });
+
+  await assert.rejects(loadConfig(root), /credentialSource/);
+}
+
 async function testPlannerAndExecutionFlow(): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "felix-job-"));
   await ensureFelixDirectories(root);
@@ -44,7 +59,7 @@ async function testPlannerAndExecutionFlow(): Promise<void> {
     }
   };
 
-  const store = new StateStore(path.join(root, ".felixai"));
+  const store = new StateStore(root, { stateDir: config.stateDir, logDir: config.logDir });
   const manager = new JobManager({
     config,
     store,
@@ -78,6 +93,8 @@ async function testPlannerAndExecutionFlow(): Promise<void> {
   assert.equal(job.workItems.filter((item) => item.status === "completed").length, 2);
   assert.ok(job.workItems.every((item) => item.branchName?.startsWith("agent/")));
   assert.ok(await pathExists(job.workItems[0].workspacePath as string));
+  assert.ok(await pathExists(path.join(root, ".felixai", "logs", "jobs", `${job.jobId}.events.jsonl`)));
+  assert.ok(await pathExists(path.join(root, ".felixai", "logs", "jobs", `${job.jobId}.summary.json`)));
 }
 
 async function testResumeFlow(): Promise<void> {
@@ -85,7 +102,7 @@ async function testResumeFlow(): Promise<void> {
   await ensureFelixDirectories(root);
 
   let firstAttempt = true;
-  const store = new StateStore(path.join(root, ".felixai"));
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
   const manager = new JobManager({
     config: DEFAULT_CONFIG,
     store,
@@ -132,10 +149,41 @@ async function testResumeFlow(): Promise<void> {
   assert.equal(saved.status, "completed");
 }
 
+async function testInvalidStateFailsValidation(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-state-"));
+  await ensureFelixDirectories(root);
+  await writeJsonFile(path.join(root, ".felixai", "state", "jobs", "broken.json"), {
+    schemaVersion: 1,
+    jobId: "broken",
+    status: "running",
+    repoPath: root,
+    repoRoot: root,
+    task: "broken",
+    baseBranch: "main",
+    parallelism: 0,
+    autoResume: false,
+    maxResumesPerItem: 2,
+    workItems: [],
+    sessions: [],
+    events: [],
+    mergeReadiness: {
+      completedBranches: [],
+      pendingBranches: []
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  await assert.rejects(store.loadJob("broken"), /parallelism/);
+}
+
 async function main(): Promise<void> {
   await testInit();
+  await testInvalidConfigFailsValidation();
   await testPlannerAndExecutionFlow();
   await testResumeFlow();
+  await testInvalidStateFailsValidation();
   console.log("job manager tests passed");
 }
 

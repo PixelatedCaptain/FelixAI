@@ -121,8 +121,7 @@ function updateWorkItem(job: JobState, workItem: WorkItemState): JobState {
 
 export async function createJobManager(projectRoot = process.cwd(), overrides?: Partial<JobManagerDependencies>): Promise<JobManager> {
   const config = overrides?.config ?? (await loadConfig(projectRoot));
-  const root = path.resolve(projectRoot, ".felixai");
-  const store = overrides?.store ?? new StateStore(root);
+  const store = overrides?.store ?? new StateStore(projectRoot, { stateDir: config.stateDir, logDir: config.logDir });
   const workspaceManager =
     overrides?.workspaceManager ?? new WorkspaceManager(path.resolve(projectRoot, config.workspaceRoot));
   const adapter = new CodexAdapter(config);
@@ -223,8 +222,8 @@ export class JobManager {
       job.status = "running";
       await this.deps.store.saveJob(job);
 
-      const results = await Promise.all(ready.map((item) => this.executeSingleItem(jobId, item.id)));
-      job = results[results.length - 1];
+      await Promise.all(ready.map((item) => this.executeSingleItem(jobId, item.id)));
+      job = await this.deps.store.loadJob(jobId);
       includeBoundary = job.autoResume;
     }
   }

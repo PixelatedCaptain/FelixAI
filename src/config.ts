@@ -2,6 +2,7 @@ import path from "node:path";
 
 import { ensureDirectory, pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
 import { STATE_SCHEMA_VERSION, type FelixConfig } from "./types.js";
+import { migrateConfig, validateConfig } from "./validation.js";
 
 export const DEFAULT_CONFIG: FelixConfig = {
   schemaVersion: STATE_SCHEMA_VERSION,
@@ -37,10 +38,11 @@ export async function ensureFelixDirectories(projectRoot = process.cwd()): Promi
 export async function loadConfig(projectRoot = process.cwd()): Promise<FelixConfig> {
   const configPath = getConfigPath(projectRoot);
   if (!(await pathExists(configPath))) {
-    return DEFAULT_CONFIG;
+    return validateConfig(structuredClone(DEFAULT_CONFIG));
   }
 
-  return readJsonFile<FelixConfig>(configPath);
+  const raw = await readJsonFile<unknown>(configPath);
+  return validateConfig(migrateConfig(raw));
 }
 
 export async function writeDefaultConfig(projectRoot = process.cwd(), force = false): Promise<boolean> {
@@ -50,6 +52,6 @@ export async function writeDefaultConfig(projectRoot = process.cwd(), force = fa
   }
 
   await ensureFelixDirectories(projectRoot);
-  await writeJsonFile(configPath, DEFAULT_CONFIG);
+  await writeJsonFile(configPath, validateConfig(structuredClone(DEFAULT_CONFIG)));
   return true;
 }

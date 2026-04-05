@@ -57,10 +57,19 @@ The default is `chatgpt-session` so ambient shell API keys do not create ambigui
 ```bash
 felixai init
 felixai job start --repo . --task "Build the first milestone"
+felixai job start --repo . --task-file ./felixai.task.json
 felixai job status <job-id>
 felixai job list
 felixai job resume <job-id>
 ```
+
+## Logging
+
+FelixAI persists:
+
+- job state under `.felixai/state/jobs`
+- per-job event logs under `.felixai/logs/jobs/*.events.jsonl`
+- per-job log summaries under `.felixai/logs/jobs/*.summary.json`
 
 ## Repo Docs
 

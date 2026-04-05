@@ -1,17 +1,27 @@
 import path from "node:path";
 
-import { ensureDirectory, listJsonFiles, readJsonFile, writeJsonFile } from "./fs-utils.js";
-import type { JobState } from "./types.js";
+import { ensureDirectory, listJsonFiles, pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
+import { JobLogger } from "./logger.js";
+import type { JobEvent, JobState, SessionState, WorkItemState } from "./types.js";
+import { migrateJobState, validateJobState } from "./validation.js";
 
 export class StateStore {
-  constructor(private readonly root: string) {}
+  private readonly logger: JobLogger;
+  private readonly pendingWrites = new Map<string, Promise<void>>();
+  private readonly jobsDirPath: string;
+
+  constructor(projectRoot: string, options: { stateDir: string; logDir: string }) {
+    this.jobsDirPath = path.join(path.resolve(projectRoot), options.stateDir, "jobs");
+    this.logger = new JobLogger(path.resolve(projectRoot, options.logDir));
+  }
 
   get jobsDir(): string {
-    return path.join(this.root, "state", "jobs");
+    return this.jobsDirPath;
   }
 
   async ensure(): Promise<void> {
     await ensureDirectory(this.jobsDir);
+    await this.logger.ensure();
   }
 
   getJobPath(jobId: string): string {
@@ -20,17 +30,156 @@ export class StateStore {
 
   async saveJob(job: JobState): Promise<void> {
     await this.ensure();
-    await writeJsonFile(this.getJobPath(job.jobId), job);
+    const validated = validateJobState(job);
+    const previous = this.pendingWrites.get(validated.jobId) ?? Promise.resolve();
+    const next = previous.then(async () => {
+      const merged = await this.mergeWithCurrent(validated);
+      await writeJsonFile(this.getJobPath(merged.jobId), merged);
+      await this.logger.syncJob(merged);
+    });
+
+    this.pendingWrites.set(validated.jobId, next);
+    await next;
   }
 
   async loadJob(jobId: string): Promise<JobState> {
-    return readJsonFile<JobState>(this.getJobPath(jobId));
+    await this.pendingWrites.get(jobId);
+    const raw = await readJsonFile<unknown>(this.getJobPath(jobId));
+    return validateJobState(migrateJobState(raw));
   }
 
   async listJobs(): Promise<JobState[]> {
     await this.ensure();
     const files = await listJsonFiles(this.jobsDir);
-    const jobs = await Promise.all(files.map((file) => readJsonFile<JobState>(file)));
+    const jobs = await Promise.all(files.map(async (file) => validateJobState(migrateJobState(await readJsonFile<unknown>(file)))));
     return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
+
+  private async mergeWithCurrent(incoming: JobState): Promise<JobState> {
+    const jobPath = this.getJobPath(incoming.jobId);
+    if (!(await pathExists(jobPath))) {
+      return incoming;
+    }
+
+    const current = validateJobState(migrateJobState(await readJsonFile<unknown>(jobPath)));
+    return mergeJobStates(current, incoming);
+  }
+}
+
+const workItemStatusRank: Record<WorkItemState["status"], number> = {
+  pending: 0,
+  running: 1,
+  boundary: 2,
+  completed: 3,
+  failed: 4
+};
+
+const sessionStatusRank: Record<SessionState["status"], number> = {
+  pending: 0,
+  running: 1,
+  boundary: 2,
+  completed: 3,
+  failed: 4
+};
+
+function mergeWorkItems(current: WorkItemState[], incoming: WorkItemState[]): WorkItemState[] {
+  const merged = new Map<string, WorkItemState>();
+  for (const item of current) {
+    merged.set(item.id, item);
+  }
+  for (const item of incoming) {
+    const existing = merged.get(item.id);
+    if (!existing) {
+      merged.set(item.id, item);
+      continue;
+    }
+
+    const preferred =
+      workItemStatusRank[item.status] > workItemStatusRank[existing.status] ||
+      item.attempts > existing.attempts ||
+      (item.completedAt ?? "") > (existing.completedAt ?? "") ||
+      (item.startedAt ?? "") > (existing.startedAt ?? "")
+        ? item
+        : existing;
+    merged.set(item.id, {
+      ...existing,
+      ...preferred,
+      dependsOn: preferred.dependsOn
+    });
+  }
+  return [...merged.values()];
+}
+
+function mergeSessions(current: SessionState[], incoming: SessionState[]): SessionState[] {
+  const merged = new Map<string, SessionState>();
+  for (const session of current) {
+    merged.set(session.workItemId, session);
+  }
+  for (const session of incoming) {
+    const existing = merged.get(session.workItemId);
+    if (!existing) {
+      merged.set(session.workItemId, session);
+      continue;
+    }
+
+    const preferred =
+      sessionStatusRank[session.status] > sessionStatusRank[existing.status] ||
+      session.attemptCount > existing.attemptCount ||
+      session.updatedAt > existing.updatedAt
+        ? session
+        : existing;
+    merged.set(session.workItemId, { ...existing, ...preferred });
+  }
+  return [...merged.values()];
+}
+
+function mergeEvents(current: JobEvent[], incoming: JobEvent[]): JobEvent[] {
+  const seen = new Set<string>();
+  const merged: JobEvent[] = [];
+  for (const event of [...current, ...incoming]) {
+    const key = `${event.timestamp}|${event.level}|${event.scope}|${event.workItemId ?? ""}|${event.message}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(event);
+    }
+  }
+  return merged.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+}
+
+function deriveStatus(job: JobState): JobState["status"] {
+  if (job.workItems.some((item) => item.status === "failed")) {
+    return "failed";
+  }
+  if (job.workItems.length > 0 && job.workItems.every((item) => item.status === "completed")) {
+    return "completed";
+  }
+  if (job.workItems.some((item) => item.status === "boundary")) {
+    return "paused";
+  }
+  if (job.workItems.some((item) => item.status === "running")) {
+    return "running";
+  }
+  return job.status;
+}
+
+function mergeJobStates(current: JobState, incoming: JobState): JobState {
+  const workItems = mergeWorkItems(current.workItems, incoming.workItems);
+  return {
+    ...current,
+    ...incoming,
+    workItems,
+    sessions: mergeSessions(current.sessions, incoming.sessions),
+    events: mergeEvents(current.events, incoming.events),
+    mergeReadiness: {
+      completedBranches: workItems.filter((item) => item.status === "completed" && item.branchName).map((item) => item.branchName as string),
+      pendingBranches: workItems.filter((item) => item.status !== "completed" && item.branchName).map((item) => item.branchName as string)
+    },
+    updatedAt: incoming.updatedAt > current.updatedAt ? incoming.updatedAt : current.updatedAt,
+    status: deriveStatus({
+      ...incoming,
+      workItems,
+      sessions: mergeSessions(current.sessions, incoming.sessions),
+      events: mergeEvents(current.events, incoming.events)
+    })
+  };
 }

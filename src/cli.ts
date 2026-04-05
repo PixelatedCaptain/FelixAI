@@ -2,18 +2,25 @@
 
 import path from "node:path";
 
+import { readJsonFile } from "./fs-utils.js";
 import { initializeProject } from "./init.js";
 import { createJobManager } from "./job-manager.js";
+import { readTaskFromJson } from "./validation.js";
 
 function printUsage(): void {
   console.log(`FelixAI Orchestrator
 
 Usage:
   felixai init [--force]
-  felixai job start --repo <path> --task "<large task>" [--base-branch <branch>] [--parallel <n>] [--auto-resume]
+  felixai job start --repo <path> (--task "<large task>" | --task-file <file>) [--base-branch <branch>] [--parallel <n>] [--auto-resume]
   felixai job status <job-id>
   felixai job resume <job-id>
   felixai job list
+
+Examples:
+  felixai init
+  felixai job start --repo . --task "Build the next milestone"
+  felixai job start --repo . --task-file ./felixai.task.json --parallel 3 --auto-resume
 `);
 }
 
@@ -83,7 +90,7 @@ async function main(): Promise<void> {
       switch (jobCommand) {
         case "start": {
           const repoPath = path.resolve(requireValue(getFlagValue(jobArgs, "--repo"), "Missing --repo value."));
-          const task = requireValue(getFlagValue(jobArgs, "--task"), "Missing --task value.");
+          const task = await resolveTaskInput(jobArgs);
           const baseBranch = getFlagValue(jobArgs, "--base-branch");
           const parallelism = parseInteger(getFlagValue(jobArgs, "--parallel"));
           const autoResume = hasFlag(jobArgs, "--auto-resume");
@@ -125,7 +132,7 @@ async function main(): Promise<void> {
           return;
         }
         default:
-          throw new Error(`Unknown job subcommand '${jobCommand ?? ""}'.`);
+          throw new Error(`Unknown job subcommand '${jobCommand ?? ""}'. Use 'start', 'status', 'resume', or 'list'.`);
       }
     }
     default:
@@ -139,3 +146,23 @@ main().catch((error: unknown) => {
   console.error(`[felixai] ${message}`);
   process.exitCode = 1;
 });
+
+async function resolveTaskInput(args: string[]): Promise<string> {
+  const inlineTask = getFlagValue(args, "--task");
+  const taskFile = getFlagValue(args, "--task-file");
+
+  if (inlineTask && taskFile) {
+    throw new Error("Use either --task or --task-file, not both.");
+  }
+
+  if (inlineTask) {
+    return requireValue(inlineTask, "Missing --task value.");
+  }
+
+  if (taskFile) {
+    const raw = await readJsonFile<unknown>(path.resolve(taskFile));
+    return readTaskFromJson(raw);
+  }
+
+  throw new Error("Missing task input. Provide --task or --task-file.");
+}
