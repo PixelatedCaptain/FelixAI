@@ -3,6 +3,8 @@
 import path from "node:path";
 
 import { readJsonFile } from "./fs-utils.js";
+import packageJson from "../package.json" with { type: "json" };
+import { loadConfig } from "./config.js";
 import { initializeProject } from "./init.js";
 import { createJobManager } from "./job-manager.js";
 import { readTaskFromJson } from "./validation.js";
@@ -12,6 +14,8 @@ function printUsage(): void {
 
 Usage:
   felixai init [--force]
+  felixai config show
+  felixai version
   felixai job start --repo <path> (--task "<large task>" | --task-file <file>) [--base-branch <branch>] [--parallel <n>] [--auto-resume]
   felixai job status <job-id>
   felixai job resume <job-id>
@@ -19,6 +23,7 @@ Usage:
 
 Examples:
   felixai init
+  felixai config show
   felixai job start --repo . --task "Build the next milestone"
   felixai job start --repo . --task-file ./felixai.task.json --parallel 3 --auto-resume
 `);
@@ -80,6 +85,29 @@ async function main(): Promise<void> {
       for (const entry of result.skipped) {
         console.log(`[felixai] skipped existing ${entry}`);
       }
+      return;
+    }
+    case "config": {
+      const configCommand = rest[0];
+      if (configCommand !== "show") {
+        throw new Error(`Unknown config subcommand '${configCommand ?? ""}'. Use 'show'.`);
+      }
+
+      const config = await loadConfig();
+      console.log(`[felixai] credential source: ${config.credentialSource}`);
+      console.log(`[felixai] state dir: ${config.stateDir}`);
+      console.log(`[felixai] workspace root: ${config.workspaceRoot}`);
+      console.log(`[felixai] log dir: ${config.logDir}`);
+      console.log(`[felixai] sandbox mode: ${config.codex.sandboxMode}`);
+      console.log(`[felixai] approval policy: ${config.codex.approvalPolicy}`);
+      console.log(`[felixai] parallelism: ${config.codex.parallelism}`);
+      console.log(`[felixai] auto resume: ${config.codex.autoResume}`);
+      return;
+    }
+    case "version": {
+      console.log(`[felixai] version: ${packageJson.version}`);
+      console.log("[felixai] config schema version: 1");
+      console.log("[felixai] state schema version: 1");
       return;
     }
     case "job": {
