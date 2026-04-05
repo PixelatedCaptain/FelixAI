@@ -905,6 +905,129 @@ async function testMergeAutomationPersistsSuccessAndConflict(): Promise<void> {
   assert.equal(conflicted.mergeAutomation.conflicts.length, 1);
 }
 
+async function testCreateJobPullRequestsPersistsLinks(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-pr-"));
+  await ensureFelixDirectories(root);
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    createPullRequests: async (job) =>
+      job.workItems.map((item, index) => ({
+        workItemId: item.id,
+        sourceBranch: item.branchName as string,
+        targetBranch: "main",
+        issueRefs: item.issueRefs ?? [],
+        title: item.title,
+        body: `PR for ${item.id}`,
+        compareUrl: `https://github.com/PixelatedCaptain/FelixAI/compare/main...${item.branchName as string}`,
+        pullRequestNumber: index + 10,
+        pullRequestUrl: `https://github.com/PixelatedCaptain/FelixAI/pull/${index + 10}`,
+        status: "draft",
+        updatedAt: new Date().toISOString()
+      })),
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId, _baseBranch, _repoRoot, issueRefs) =>
+        createFakeWorkspaceForIssues(root, jobId, workItemId, issueRefs)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "pr",
+      workItems: [{ id: "api", title: "API", prompt: "API", dependsOn: [], issueRefs: ["142"] }]
+    }),
+    executor: async (): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: "done",
+      sessionId: "session-api"
+    })
+  });
+
+  const started = await manager.startJob({
+    repoPath: root,
+    task: "pr"
+  });
+  const job = await manager.createJobPullRequests(started.jobId);
+  assert.equal(job.pullRequests.length, 1);
+  assert.equal(job.pullRequests[0]?.status, "draft");
+  assert.match(job.pullRequests[0]?.pullRequestUrl ?? "", /\/pull\/10$/);
+}
+
+async function testResolveJobMergeConflictsPersistsResolution(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-resolve-conflicts-"));
+  await ensureFelixDirectories(root);
+  let unresolved = true;
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    runMergeAutomation: async (job) => ({
+      targetBranch: "main",
+      mergeBranchName: `agent/merge/job-${job.jobId.slice(0, 8)}`,
+      mergedBranches: [job.workItems[0].branchName as string],
+      pendingBranches: [],
+      conflicts: [
+        {
+          sourceBranch: job.workItems[1].branchName as string,
+          files: ["src/shared.ts"]
+        }
+      ],
+      status: "conflicted",
+      workspacePath: path.join(root, ".felixai", "merges", job.jobId),
+      attemptedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      error: "merge conflict"
+    }),
+    resolveMergeConflicts: async (job) => ({
+      ...job.mergeAutomation,
+      status: unresolved ? "conflicted" : "merged",
+      conflicts: unresolved ? job.mergeAutomation.conflicts : [],
+      resolutionSessionId: "session-resolve",
+      resolutionSummary: unresolved ? "Conflicts still remain" : "Conflicts resolved successfully",
+      error: unresolved ? "Conflicts remain after resolution attempt." : undefined,
+      completedAt: new Date().toISOString()
+    }),
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId, _baseBranch, _repoRoot, issueRefs) =>
+        createFakeWorkspaceForIssues(root, jobId, workItemId, issueRefs)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "resolve conflicts",
+      workItems: [
+        { id: "api", title: "API", prompt: "API", dependsOn: [], issueRefs: ["142"] },
+        { id: "ui", title: "UI", prompt: "UI", dependsOn: [], issueRefs: ["143"] }
+      ]
+    }),
+    executor: async ({ prompt }): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: `${prompt} done`,
+      sessionId: `session-${prompt.toLowerCase()}`
+    })
+  });
+
+  const started = await manager.startJob({
+    repoPath: root,
+    task: "resolve conflicts"
+  });
+  await manager.mergeJobBranches(started.jobId);
+
+  const unresolvedJob = await manager.resolveJobMergeConflicts(started.jobId);
+  assert.equal(unresolvedJob.mergeAutomation.status, "conflicted");
+  assert.equal(unresolvedJob.mergeAutomation.resolutionSessionId, "session-resolve");
+
+  unresolved = false;
+  const resolvedJob = await manager.resolveJobMergeConflicts(started.jobId);
+  assert.equal(resolvedJob.mergeAutomation.status, "merged");
+  assert.equal(resolvedJob.mergeAutomation.conflicts.length, 0);
+  assert.equal(resolvedJob.mergeAutomation.resolutionSummary, "Conflicts resolved successfully");
+}
+
 async function main(): Promise<void> {
   await testInit();
   await testInvalidConfigFailsValidation();
@@ -925,6 +1048,8 @@ async function main(): Promise<void> {
   await testBlockedExecutionIsPersistedForManualReview();
   await testPushJobBranchesRefreshesRemoteState();
   await testMergeAutomationPersistsSuccessAndConflict();
+  await testCreateJobPullRequestsPersistsLinks();
+  await testResolveJobMergeConflictsPersistsResolution();
   console.log("job manager tests passed");
 }
 

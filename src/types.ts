@@ -10,6 +10,7 @@ export type EventLevel = "info" | "warn" | "error";
 export type PushStatus = "no-remote" | "branch-not-pushed" | "up-to-date" | "ahead-of-remote" | "behind-remote" | "diverged" | "unknown";
 export type IssueRunStatus = "not_started" | "in_progress" | "blocked" | "completed";
 export type MergeAttemptStatus = "pending" | "merged" | "conflicted" | "failed";
+export type PullRequestStatus = "not-created" | "draft" | "open" | "merged" | "closed";
 export type FailureCategory =
   | "workspace-conflict"
   | "workspace-missing"
@@ -145,6 +146,20 @@ export interface IssueRunSummary {
   updatedAt: string;
 }
 
+export interface PullRequestLink {
+  workItemId: string;
+  sourceBranch: string;
+  targetBranch: string;
+  issueRefs: string[];
+  title: string;
+  body: string;
+  compareUrl?: string;
+  pullRequestNumber?: number;
+  pullRequestUrl?: string;
+  status: PullRequestStatus;
+  updatedAt: string;
+}
+
 export interface MergeConflict {
   sourceBranch: string;
   files: string[];
@@ -158,6 +173,8 @@ export interface MergeAutomationState {
   conflicts: MergeConflict[];
   status: MergeAttemptStatus;
   workspacePath?: string;
+  resolutionSessionId?: string;
+  resolutionSummary?: string;
   attemptedAt?: string;
   completedAt?: string;
   error?: string;
@@ -182,6 +199,7 @@ export interface JobState {
   mergeReadiness: MergeReadiness;
   mergeAutomation: MergeAutomationState;
   remoteBranches: RemoteBranchState[];
+  pullRequests: PullRequestLink[];
   issueSummaries: IssueRunSummary[];
   createdAt: string;
   updatedAt: string;

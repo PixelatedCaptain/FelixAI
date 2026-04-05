@@ -46,6 +46,7 @@ export class JobLogger {
       totalEvents: job.events.length,
       mergeAutomation: job.mergeAutomation,
       remoteBranches: job.remoteBranches,
+      pullRequests: job.pullRequests,
       issueSummaries: job.issueSummaries,
       workItems: job.workItems.map((item) => ({
         id: item.id,

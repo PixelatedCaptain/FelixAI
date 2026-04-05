@@ -199,6 +199,7 @@ function mergeJobStates(current: JobState, incoming: JobState): JobState {
         ? incoming.mergeAutomation
         : current.mergeAutomation,
     remoteBranches: incoming.remoteBranches.length > 0 ? incoming.remoteBranches : current.remoteBranches,
+    pullRequests: incoming.pullRequests.length > 0 ? incoming.pullRequests : current.pullRequests,
     issueSummaries: incoming.issueSummaries.length > 0 ? incoming.issueSummaries : current.issueSummaries,
     updatedAt: incoming.updatedAt > current.updatedAt ? incoming.updatedAt : current.updatedAt,
     status: deriveStatus({

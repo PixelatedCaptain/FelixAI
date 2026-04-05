@@ -109,6 +109,9 @@ export function migrateJobState(raw: unknown): JobState {
         status: "pending"
       };
     }
+    if (!Array.isArray(migrated.pullRequests)) {
+      migrated.pullRequests = [];
+    }
     return migrated as unknown as JobState;
   }
 
@@ -164,6 +167,12 @@ export function validateJobState(job: JobState): JobState {
   if (job.mergeAutomation.workspacePath !== undefined) {
     assertString(job.mergeAutomation.workspacePath, "Job state mergeAutomation.workspacePath must be a non-empty string when present.");
   }
+  if (job.mergeAutomation.resolutionSessionId !== undefined) {
+    assertString(job.mergeAutomation.resolutionSessionId, "Job state mergeAutomation.resolutionSessionId must be a non-empty string when present.");
+  }
+  if (job.mergeAutomation.resolutionSummary !== undefined) {
+    assertString(job.mergeAutomation.resolutionSummary, "Job state mergeAutomation.resolutionSummary must be a non-empty string when present.");
+  }
   if (job.mergeAutomation.attemptedAt !== undefined) {
     assertString(job.mergeAutomation.attemptedAt, "Job state mergeAutomation.attemptedAt must be a non-empty string when present.");
   }
@@ -183,6 +192,29 @@ export function validateJobState(job: JobState): JobState {
   }
   if (!Array.isArray(job.remoteBranches)) {
     throw new Error("Job state remoteBranches must be an array.");
+  }
+  if (!Array.isArray(job.pullRequests)) {
+    throw new Error("Job state pullRequests must be an array.");
+  }
+  for (const pullRequest of job.pullRequests) {
+    assertRecord(pullRequest, "Each pull request entry must be an object.");
+    assertString(pullRequest.workItemId, "Each pull request entry must include workItemId.");
+    assertString(pullRequest.sourceBranch, "Each pull request entry must include sourceBranch.");
+    assertString(pullRequest.targetBranch, "Each pull request entry must include targetBranch.");
+    assertStringArray(pullRequest.issueRefs, "Each pull request entry issueRefs must be an array of strings.");
+    assertString(pullRequest.title, "Each pull request entry must include title.");
+    assertString(pullRequest.body, "Each pull request entry must include body.");
+    if (pullRequest.compareUrl !== undefined) {
+      assertString(pullRequest.compareUrl, "Each pull request entry compareUrl must be a non-empty string when present.");
+    }
+    if (pullRequest.pullRequestNumber !== undefined) {
+      assertPositiveInteger(pullRequest.pullRequestNumber, "Each pull request entry pullRequestNumber must be a positive integer when present.");
+    }
+    if (pullRequest.pullRequestUrl !== undefined) {
+      assertString(pullRequest.pullRequestUrl, "Each pull request entry pullRequestUrl must be a non-empty string when present.");
+    }
+    assertEnum(pullRequest.status, ["not-created", "draft", "open", "merged", "closed"], "Pull request status is invalid.");
+    assertString(pullRequest.updatedAt, "Each pull request entry updatedAt must be a non-empty string.");
   }
   for (const branch of job.remoteBranches) {
     assertRecord(branch, "Each remote branch entry must be an object.");

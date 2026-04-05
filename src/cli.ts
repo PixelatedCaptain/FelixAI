@@ -22,6 +22,8 @@ Usage:
   felixai job resume <job-id>
   felixai job push <job-id> [--work-item <id>] [--remote <name>]
   felixai job merge <job-id> [--work-item <id>] [--target-branch <branch>] [--json]
+  felixai job pr <job-id> [--work-item <id>] [--base-branch <branch>] [--no-draft] [--json]
+  felixai job resolve-conflicts <job-id> [--session <id>] [--json]
   felixai job list [--json]
 
 Examples:
@@ -33,6 +35,8 @@ Examples:
   felixai job start --repo . --task "Implement GH issue" --issue 142 --issue api-hardening
   felixai job push <job-id>
   felixai job merge <job-id> --target-branch main
+  felixai job pr <job-id>
+  felixai job resolve-conflicts <job-id>
 `);
 }
 
@@ -232,6 +236,14 @@ async function main(): Promise<void> {
               );
             }
           }
+          if (job.pullRequests.length > 0) {
+            console.log("[felixai] pull requests:");
+            for (const pullRequest of job.pullRequests) {
+              console.log(
+                `[felixai] pr ${pullRequest.workItemId}: status=${pullRequest.status} source=${pullRequest.sourceBranch} target=${pullRequest.targetBranch}`
+              );
+            }
+          }
           if (job.issueSummaries.length > 0) {
             console.log("[felixai] issue summaries:");
             for (const summary of job.issueSummaries) {
@@ -308,6 +320,56 @@ async function main(): Promise<void> {
           }
           return;
         }
+        case "pr": {
+          const jobId = requireValue(jobArgs[0], "Missing job id.");
+          const argsWithoutJobId = jobArgs.slice(1);
+          const workItemIds = getMultiFlagValues(argsWithoutJobId, "--work-item");
+          const baseBranch = getFlagValue(argsWithoutJobId, "--base-branch");
+          const draft = !hasFlag(argsWithoutJobId, "--no-draft");
+          const job = await manager.createJobPullRequests(jobId, {
+            workItemIds: workItemIds.length > 0 ? workItemIds : undefined,
+            baseBranch,
+            draft
+          });
+          if (hasFlag(argsWithoutJobId, "--json")) {
+            console.log(JSON.stringify(job.pullRequests, null, 2));
+            return;
+          }
+          for (const pullRequest of job.pullRequests) {
+            console.log(
+              `[felixai] pr ${pullRequest.workItemId}: status=${pullRequest.status} source=${pullRequest.sourceBranch} target=${pullRequest.targetBranch}`
+            );
+            if (pullRequest.pullRequestUrl) {
+              console.log(`[felixai] pr url: ${pullRequest.pullRequestUrl}`);
+            } else if (pullRequest.compareUrl) {
+              console.log(`[felixai] compare url: ${pullRequest.compareUrl}`);
+            }
+          }
+          return;
+        }
+        case "resolve-conflicts": {
+          const jobId = requireValue(jobArgs[0], "Missing job id.");
+          const argsWithoutJobId = jobArgs.slice(1);
+          const sessionId = getFlagValue(argsWithoutJobId, "--session");
+          const job = await manager.resolveJobMergeConflicts(jobId, { sessionId });
+          if (hasFlag(argsWithoutJobId, "--json")) {
+            console.log(JSON.stringify(job.mergeAutomation, null, 2));
+            return;
+          }
+          console.log(`[felixai] conflict resolution status: ${job.mergeAutomation.status}`);
+          if (job.mergeAutomation.resolutionSessionId) {
+            console.log(`[felixai] resolution session: ${job.mergeAutomation.resolutionSessionId}`);
+          }
+          if (job.mergeAutomation.resolutionSummary) {
+            console.log(`[felixai] resolution summary: ${job.mergeAutomation.resolutionSummary}`);
+          }
+          if (job.mergeAutomation.conflicts.length > 0) {
+            for (const conflict of job.mergeAutomation.conflicts) {
+              console.log(`[felixai] remaining conflict ${conflict.sourceBranch}: ${conflict.files.join(", ") || "files unknown"}`);
+            }
+          }
+          return;
+        }
         case "list": {
           const jobs = await manager.listJobs();
           if (hasFlag(jobArgs, "--json")) {
@@ -323,7 +385,9 @@ async function main(): Promise<void> {
           return;
         }
         default:
-          throw new Error(`Unknown job subcommand '${jobCommand ?? ""}'. Use 'start', 'status', 'resume', 'push', 'merge', or 'list'.`);
+          throw new Error(
+            `Unknown job subcommand '${jobCommand ?? ""}'. Use 'start', 'status', 'resume', 'push', 'merge', 'pr', 'resolve-conflicts', or 'list'.`
+          );
       }
     }
     default:

@@ -83,6 +83,7 @@ Under `.felixai/`:
 - Branch naming should prefer issue-linked traceability when issue references are present.
 - FelixAI derives remote branch status from local Git refs so the relay can show push readiness without needing GitHub API calls.
 - FelixAI can push completed work-item branches through an explicit CLI workflow instead of assuming pushes happen outside the tool.
+- FelixAI can persist issue-aware pull request metadata and optionally create pull requests through GitHub CLI when the host is authenticated.
 - FelixAI derives per-issue summaries from work-item state, branch state, and latest Codex responses.
 
 ## Merge automation
@@ -90,6 +91,7 @@ Under `.felixai/`:
 - FelixAI does not merge directly into the long-lived base branch by default.
 - It creates a candidate merge branch off the selected target branch and attempts sequential merges there.
 - Conflicts are recorded as structured merge-automation state so operators can inspect the branch and conflict files later.
+- A follow-on conflict-resolution workflow can re-enter the merge candidate workspace and use Codex to attempt conflict resolution while preserving the resolution session metadata.
 
 ## Near-term gaps
 

@@ -21,6 +21,7 @@ import {
 import { StateStore } from "./state-store.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { CodexAdapter } from "./codex-adapter.js";
+import { buildCompareUrl, createPullRequest } from "./github.js";
 import {
   type BranchReadiness,
   type FailureCategory,
@@ -34,6 +35,7 @@ import {
   type MergeAutomationState,
   type PlanResult,
   type PlannedWorkItem,
+  type PullRequestLink,
   type RemoteBranchState,
   type SessionState,
   type WorkItemState
@@ -55,6 +57,11 @@ export interface JobManagerDependencies {
   analyzeRemoteBranches?: (job: JobState) => Promise<JobState["remoteBranches"]>;
   pushWorkItemBranches?: (job: JobState, options?: { workItemIds?: string[]; remoteName?: string }) => Promise<JobState["remoteBranches"]>;
   runMergeAutomation?: (job: JobState, options?: { workItemIds?: string[]; targetBranch?: string }) => Promise<MergeAutomationState>;
+  createPullRequests?: (
+    job: JobState,
+    options?: { workItemIds?: string[]; baseBranch?: string; draft?: boolean }
+  ) => Promise<PullRequestLink[]>;
+  resolveMergeConflicts?: (job: JobState, options?: { sessionId?: string }) => Promise<MergeAutomationState>;
   resolveRepoContext: (
     repoPath: string,
     requestedBaseBranch?: string,
@@ -379,6 +386,7 @@ export class JobManager {
       },
       mergeAutomation: createEmptyMergeAutomation(baseBranch),
       remoteBranches: [],
+      pullRequests: [],
       issueSummaries: [],
       createdAt,
       updatedAt: createdAt
@@ -471,6 +479,34 @@ export class JobManager {
       );
     } else {
       job = addEvent(job, "error", "job", `Merge automation failed: ${job.mergeAutomation.error ?? "unknown error"}`);
+    }
+
+    await this.deps.store.saveJob(job);
+    return job;
+  }
+
+  async createJobPullRequests(jobId: string, options?: { workItemIds?: string[]; baseBranch?: string; draft?: boolean }): Promise<JobState> {
+    let job = await this.deps.store.loadJob(jobId);
+    job.pullRequests = this.deps.createPullRequests
+      ? await this.deps.createPullRequests(job, options)
+      : await this.createPullRequestsDefault(job, options);
+    job = addEvent(job, "info", "job", `Prepared ${job.pullRequests.length} pull request link(s).`);
+    await this.deps.store.saveJob(job);
+    return job;
+  }
+
+  async resolveJobMergeConflicts(jobId: string, options?: { sessionId?: string }): Promise<JobState> {
+    let job = await this.deps.store.loadJob(jobId);
+    job.mergeAutomation = this.deps.resolveMergeConflicts
+      ? await this.deps.resolveMergeConflicts(job, options)
+      : await this.resolveMergeConflictsDefault(job, options);
+
+    if (job.mergeAutomation.status === "merged") {
+      job = addEvent(job, "info", "job", "Conflict resolution completed successfully on the merge candidate branch.");
+    } else if (job.mergeAutomation.status === "conflicted") {
+      job = addEvent(job, "warn", "job", "Conflict resolution ran but merge conflicts remain.");
+    } else {
+      job = addEvent(job, "error", "job", `Conflict resolution failed: ${job.mergeAutomation.error ?? "unknown error"}`);
     }
 
     await this.deps.store.saveJob(job);
@@ -654,6 +690,114 @@ export class JobManager {
       mergeAutomation.completedAt = now();
       return mergeAutomation;
     }
+  }
+
+  private async createPullRequestsDefault(
+    job: JobState,
+    options?: { workItemIds?: string[]; baseBranch?: string; draft?: boolean }
+  ): Promise<PullRequestLink[]> {
+    const targetBranch = options?.baseBranch ?? job.baseBranch;
+    const remoteName = await getPreferredRemote(job.repoRoot);
+    const remoteUrl = remoteName ? await getRemoteUrl(job.repoRoot, remoteName) : undefined;
+    const selected = job.workItems.filter(
+      (item) =>
+        item.status === "completed" &&
+        item.branchName &&
+        (!options?.workItemIds || options.workItemIds.includes(item.id))
+    );
+
+    const links: PullRequestLink[] = [];
+    for (const item of selected) {
+      const issuePrefix = (item.issueRefs ?? []).map((issue) => `#${issue}`).join(" ");
+      const title = `${item.title}${issuePrefix ? ` (${issuePrefix})` : ""}`;
+      const bodyLines = [
+        `Automated FelixAI pull request for work item \`${item.id}\`.`,
+        "",
+        `Source branch: \`${item.branchName as string}\``,
+        `Target branch: \`${targetBranch}\``
+      ];
+      if ((item.issueRefs ?? []).length > 0) {
+        bodyLines.push("", `Related issues: ${(item.issueRefs ?? []).map((issue) => `#${issue}`).join(", ")}`);
+      }
+      if (item.lastResponse) {
+        bodyLines.push("", "Latest FelixAI summary:", item.lastResponse);
+      }
+      const body = bodyLines.join("\n");
+      const compareUrl = remoteUrl ? buildCompareUrl(remoteUrl, targetBranch, item.branchName as string) : undefined;
+      let created: { number?: number; url?: string; status: "draft" | "open" } | undefined;
+      try {
+        created = await createPullRequest({
+          repoPath: job.repoRoot,
+          baseBranch: targetBranch,
+          headBranch: item.branchName as string,
+          title,
+          body,
+          draft: options?.draft ?? true
+        });
+      } catch {
+        created = undefined;
+      }
+
+      links.push({
+        workItemId: item.id,
+        sourceBranch: item.branchName as string,
+        targetBranch,
+        issueRefs: item.issueRefs ?? [],
+        title,
+        body,
+        compareUrl,
+        pullRequestNumber: created?.number,
+        pullRequestUrl: created?.url,
+        status: created?.status ?? "not-created",
+        updatedAt: now()
+      });
+    }
+
+    return links;
+  }
+
+  private async resolveMergeConflictsDefault(job: JobState, options?: { sessionId?: string }): Promise<MergeAutomationState> {
+    const current = { ...job.mergeAutomation };
+    if (current.status !== "conflicted" || !current.workspacePath) {
+      return {
+        ...current,
+        status: "failed",
+        error: "No conflicted merge candidate is available to resolve."
+      };
+    }
+
+    const conflictFiles = current.conflicts.flatMap((entry) => entry.files);
+    const uniqueFiles = [...new Set(conflictFiles)];
+    const prompt = [
+      "Resolve the current Git merge conflicts in this workspace.",
+      `Target branch: ${current.targetBranch}`,
+      `Candidate branch: ${current.mergeBranchName ?? "unknown"}`,
+      uniqueFiles.length > 0 ? `Conflicted files: ${uniqueFiles.join(", ")}` : "Conflicted files: unknown",
+      "Inspect the repo state, resolve the conflicts, stage the resolved files if appropriate, and summarize the resolution."
+    ].join("\n");
+
+    const result = await this.deps.executor({
+      prompt,
+      workspacePath: current.workspacePath,
+      sessionId: options?.sessionId
+    });
+
+    const remaining = await listConflictedFiles(current.workspacePath).catch(() => []);
+    return {
+      ...current,
+      resolutionSessionId: result.sessionId ?? current.resolutionSessionId,
+      resolutionSummary: result.summary,
+      conflicts:
+        remaining.length === 0
+          ? []
+          : current.conflicts.map((entry) => ({
+              ...entry,
+              files: remaining
+            })),
+      status: remaining.length === 0 && result.status === "completed" ? "merged" : "conflicted",
+      completedAt: remaining.length === 0 ? now() : current.completedAt,
+      error: remaining.length === 0 ? undefined : current.error ?? "Conflicts remain after resolution attempt."
+    };
   }
 
   private async executeSingleItem(jobId: string, workItemId: string): Promise<JobState> {
