@@ -9,6 +9,7 @@ export type SessionStatus = "pending" | "running" | "boundary" | "blocked" | "co
 export type EventLevel = "info" | "warn" | "error";
 export type PushStatus = "no-remote" | "branch-not-pushed" | "up-to-date" | "ahead-of-remote" | "behind-remote" | "diverged" | "unknown";
 export type IssueRunStatus = "not_started" | "in_progress" | "blocked" | "completed";
+export type MergeAttemptStatus = "pending" | "merged" | "conflicted" | "failed";
 export type FailureCategory =
   | "workspace-conflict"
   | "workspace-missing"
@@ -144,6 +145,24 @@ export interface IssueRunSummary {
   updatedAt: string;
 }
 
+export interface MergeConflict {
+  sourceBranch: string;
+  files: string[];
+}
+
+export interface MergeAutomationState {
+  mergeBranchName?: string;
+  targetBranch: string;
+  mergedBranches: string[];
+  pendingBranches: string[];
+  conflicts: MergeConflict[];
+  status: MergeAttemptStatus;
+  workspacePath?: string;
+  attemptedAt?: string;
+  completedAt?: string;
+  error?: string;
+}
+
 export interface JobState {
   schemaVersion: number;
   jobId: string;
@@ -161,6 +180,7 @@ export interface JobState {
   sessions: SessionState[];
   events: JobEvent[];
   mergeReadiness: MergeReadiness;
+  mergeAutomation: MergeAutomationState;
   remoteBranches: RemoteBranchState[];
   issueSummaries: IssueRunSummary[];
   createdAt: string;

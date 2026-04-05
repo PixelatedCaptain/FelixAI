@@ -20,6 +20,8 @@ Usage:
   felixai job start --repo <path> (--task "<large task>" | --task-file <file>) [--base-branch <branch>] [--parallel <n>] [--auto-resume] [--require-clean] [--issue <id>]
   felixai job status <job-id> [--json]
   felixai job resume <job-id>
+  felixai job push <job-id> [--work-item <id>] [--remote <name>]
+  felixai job merge <job-id> [--work-item <id>] [--target-branch <branch>] [--json]
   felixai job list [--json]
 
 Examples:
@@ -29,6 +31,8 @@ Examples:
   felixai job start --repo . --task-file ./felixai.task.json --parallel 3 --auto-resume
   felixai job start --repo . --task "Refactor auth" --require-clean
   felixai job start --repo . --task "Implement GH issue" --issue 142 --issue api-hardening
+  felixai job push <job-id>
+  felixai job merge <job-id> --target-branch main
 `);
 }
 
@@ -211,6 +215,14 @@ async function main(): Promise<void> {
               );
             }
           }
+          if (job.mergeAutomation.attemptedAt) {
+            console.log(
+              `[felixai] merge automation: status=${job.mergeAutomation.status} target=${job.mergeAutomation.targetBranch} merged=${job.mergeAutomation.mergedBranches.length} pending=${job.mergeAutomation.pendingBranches.length}`
+            );
+            if (job.mergeAutomation.mergeBranchName) {
+              console.log(`[felixai] merge candidate branch: ${job.mergeAutomation.mergeBranchName}`);
+            }
+          }
           if (job.remoteBranches.length > 0) {
             console.log("[felixai] remote branches:");
             for (const branch of job.remoteBranches) {
@@ -256,6 +268,46 @@ async function main(): Promise<void> {
           console.log(`[felixai] job ${job.jobId} status: ${job.status}`);
           return;
         }
+        case "push": {
+          const jobId = requireValue(jobArgs[0], "Missing job id.");
+          const workItemIds = getMultiFlagValues(jobArgs.slice(1), "--work-item");
+          const remoteName = getFlagValue(jobArgs.slice(1), "--remote");
+          const job = await manager.pushJobBranches(jobId, {
+            workItemIds: workItemIds.length > 0 ? workItemIds : undefined,
+            remoteName
+          });
+          console.log(`[felixai] job ${job.jobId} pushed branches refreshed`);
+          return;
+        }
+        case "merge": {
+          const jobId = requireValue(jobArgs[0], "Missing job id.");
+          const argsWithoutJobId = jobArgs.slice(1);
+          const workItemIds = getMultiFlagValues(argsWithoutJobId, "--work-item");
+          const targetBranch = getFlagValue(argsWithoutJobId, "--target-branch");
+          const job = await manager.mergeJobBranches(jobId, {
+            workItemIds: workItemIds.length > 0 ? workItemIds : undefined,
+            targetBranch
+          });
+          if (hasFlag(argsWithoutJobId, "--json")) {
+            console.log(JSON.stringify(job.mergeAutomation, null, 2));
+            return;
+          }
+          console.log(`[felixai] merge status: ${job.mergeAutomation.status}`);
+          console.log(`[felixai] merge target: ${job.mergeAutomation.targetBranch}`);
+          if (job.mergeAutomation.mergeBranchName) {
+            console.log(`[felixai] merge branch: ${job.mergeAutomation.mergeBranchName}`);
+          }
+          console.log(`[felixai] merged branches: ${job.mergeAutomation.mergedBranches.join(", ") || "none"}`);
+          if (job.mergeAutomation.conflicts.length > 0) {
+            for (const conflict of job.mergeAutomation.conflicts) {
+              console.log(`[felixai] conflict ${conflict.sourceBranch}: ${conflict.files.join(", ") || "files unknown"}`);
+            }
+          }
+          if (job.mergeAutomation.error) {
+            console.log(`[felixai] merge error: ${job.mergeAutomation.error}`);
+          }
+          return;
+        }
         case "list": {
           const jobs = await manager.listJobs();
           if (hasFlag(jobArgs, "--json")) {
@@ -271,7 +323,7 @@ async function main(): Promise<void> {
           return;
         }
         default:
-          throw new Error(`Unknown job subcommand '${jobCommand ?? ""}'. Use 'start', 'status', 'resume', or 'list'.`);
+          throw new Error(`Unknown job subcommand '${jobCommand ?? ""}'. Use 'start', 'status', 'resume', 'push', 'merge', or 'list'.`);
       }
     }
     default:

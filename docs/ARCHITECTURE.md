@@ -52,6 +52,7 @@ Each job persists:
 - session metadata per work item
 - event timeline
 - merge-readiness summary
+- merge-automation attempt state for candidate-branch workflows
 - per-branch remote/push metadata derived from local Git refs
 - per-issue run summaries for relay/dashboard consumption later
 
@@ -81,7 +82,14 @@ Under `.felixai/`:
 - FelixAI records issue references at the job and work-item levels.
 - Branch naming should prefer issue-linked traceability when issue references are present.
 - FelixAI derives remote branch status from local Git refs so the relay can show push readiness without needing GitHub API calls.
+- FelixAI can push completed work-item branches through an explicit CLI workflow instead of assuming pushes happen outside the tool.
 - FelixAI derives per-issue summaries from work-item state, branch state, and latest Codex responses.
+
+## Merge automation
+
+- FelixAI does not merge directly into the long-lived base branch by default.
+- It creates a candidate merge branch off the selected target branch and attempts sequential merges there.
+- Conflicts are recorded as structured merge-automation state so operators can inspect the branch and conflict files later.
 
 ## Near-term gaps
 

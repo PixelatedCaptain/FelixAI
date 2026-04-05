@@ -189,6 +189,13 @@ async function testInvalidStateFailsValidation(): Promise<void> {
       pendingBranches: [],
       branchReadiness: []
     },
+    mergeAutomation: {
+      targetBranch: "main",
+      mergedBranches: [],
+      pendingBranches: [],
+      conflicts: [],
+      status: "pending"
+    },
     remoteBranches: [],
     issueSummaries: [],
     issueRefs: [],
@@ -735,6 +742,169 @@ async function testBlockedExecutionIsPersistedForManualReview(): Promise<void> {
   assert.equal(resumed.workItems[0].status, "completed");
 }
 
+async function testPushJobBranchesRefreshesRemoteState(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-push-"));
+  await ensureFelixDirectories(root);
+  let pushed = false;
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    analyzeRemoteBranches: async () =>
+      pushed
+        ? [
+            {
+              workItemId: "api",
+              branchName: "agent/issue-142/job-12345678-api",
+              issueRefs: ["142"],
+              remoteName: "origin",
+              remoteUrl: "https://github.com/PixelatedCaptain/FelixAI.git",
+              remoteBranchName: "origin/agent/issue-142/job-12345678-api",
+              existsRemotely: true,
+              pushStatus: "up-to-date",
+              aheadBy: 0,
+              behindBy: 0,
+              checkedAt: new Date().toISOString()
+            }
+          ]
+        : [
+            {
+              workItemId: "api",
+              branchName: "agent/issue-142/job-12345678-api",
+              issueRefs: ["142"],
+              remoteName: "origin",
+              remoteUrl: "https://github.com/PixelatedCaptain/FelixAI.git",
+              remoteBranchName: "origin/agent/issue-142/job-12345678-api",
+              existsRemotely: false,
+              pushStatus: "branch-not-pushed",
+              aheadBy: 0,
+              behindBy: 0,
+              checkedAt: new Date().toISOString()
+            }
+          ],
+    pushWorkItemBranches: async (job) => {
+      pushed = true;
+      return [
+        {
+          workItemId: job.workItems[0].id,
+          branchName: job.workItems[0].branchName as string,
+          issueRefs: job.workItems[0].issueRefs ?? [],
+          remoteName: "origin",
+          remoteUrl: "https://github.com/PixelatedCaptain/FelixAI.git",
+          remoteBranchName: `origin/${job.workItems[0].branchName as string}`,
+          existsRemotely: true,
+          pushStatus: "up-to-date",
+          aheadBy: 0,
+          behindBy: 0,
+          checkedAt: new Date().toISOString()
+        }
+      ];
+    },
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId, _baseBranch, _repoRoot, issueRefs) =>
+        createFakeWorkspaceForIssues(root, jobId, workItemId, issueRefs)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "push",
+      workItems: [{ id: "api", title: "API", prompt: "API", dependsOn: [], issueRefs: ["142"] }]
+    }),
+    executor: async (): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: "done",
+      sessionId: "session-api"
+    })
+  });
+
+  const started = await manager.startJob({
+    repoPath: root,
+    task: "push"
+  });
+  assert.equal(started.remoteBranches[0]?.pushStatus, "branch-not-pushed");
+
+  const pushedJob = await manager.pushJobBranches(started.jobId);
+  assert.equal(pushedJob.remoteBranches[0]?.pushStatus, "up-to-date");
+  assert.equal(pushedJob.events.some((event) => /pushed completed branches/i.test(event.message)), true);
+}
+
+async function testMergeAutomationPersistsSuccessAndConflict(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-merge-auto-"));
+  await ensureFelixDirectories(root);
+  let conflictMode = false;
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    runMergeAutomation: async (job) =>
+      conflictMode
+        ? {
+            targetBranch: "main",
+            mergeBranchName: `agent/merge/job-${job.jobId.slice(0, 8)}`,
+            mergedBranches: [job.workItems[0].branchName as string],
+            pendingBranches: [],
+            conflicts: [
+              {
+                sourceBranch: job.workItems[1].branchName as string,
+                files: ["src/shared.ts"]
+              }
+            ],
+            status: "conflicted",
+            workspacePath: path.join(root, ".felixai", "merges", job.jobId),
+            attemptedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            error: "merge conflict"
+          }
+        : {
+            targetBranch: "main",
+            mergeBranchName: `agent/merge/job-${job.jobId.slice(0, 8)}`,
+            mergedBranches: job.workItems.map((item) => item.branchName as string),
+            pendingBranches: [],
+            conflicts: [],
+            status: "merged",
+            workspacePath: path.join(root, ".felixai", "merges", job.jobId),
+            attemptedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString()
+          },
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId, _baseBranch, _repoRoot, issueRefs) =>
+        createFakeWorkspaceForIssues(root, jobId, workItemId, issueRefs)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "merge auto",
+      workItems: [
+        { id: "api", title: "API", prompt: "API", dependsOn: [], issueRefs: ["142"] },
+        { id: "ui", title: "UI", prompt: "UI", dependsOn: [], issueRefs: ["143"] }
+      ]
+    }),
+    executor: async ({ prompt }): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: `${prompt} done`,
+      sessionId: `session-${prompt.toLowerCase()}`
+    })
+  });
+
+  const started = await manager.startJob({
+    repoPath: root,
+    task: "merge auto"
+  });
+
+  const merged = await manager.mergeJobBranches(started.jobId);
+  assert.equal(merged.mergeAutomation.status, "merged");
+  assert.equal(merged.mergeAutomation.mergedBranches.length, 2);
+
+  conflictMode = true;
+  const conflicted = await manager.mergeJobBranches(started.jobId);
+  assert.equal(conflicted.mergeAutomation.status, "conflicted");
+  assert.equal(conflicted.mergeAutomation.conflicts.length, 1);
+}
+
 async function main(): Promise<void> {
   await testInit();
   await testInvalidConfigFailsValidation();
@@ -753,6 +923,8 @@ async function main(): Promise<void> {
   await testWorkspaceManagerReusesAndReattachesExistingWorktrees();
   await testWorkspaceConflictIsClassifiedAndPersisted();
   await testBlockedExecutionIsPersistedForManualReview();
+  await testPushJobBranchesRefreshesRemoteState();
+  await testMergeAutomationPersistsSuccessAndConflict();
   console.log("job manager tests passed");
 }
 

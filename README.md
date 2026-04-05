@@ -65,6 +65,8 @@ felixai job start --repo . --task "Refactor auth" --require-clean
 felixai job start --repo . --task "Implement issue" --issue 142 --issue api-hardening
 felixai job status <job-id>
 felixai job status <job-id> --json
+felixai job push <job-id>
+felixai job merge <job-id> --target-branch main
 felixai job list
 felixai job list --json
 felixai job resume <job-id>
@@ -82,6 +84,7 @@ FelixAI persists:
 `job status` also surfaces merge-readiness hints for completed branches, including likely overlaps in changed files.
 It also persists per-branch remote push status and issue-linked run summaries for later relay/dashboard use.
 Workspace setup and execution failures are classified and persisted so operators can see whether a condition is retryable or needs manual review.
+Merge automation attempts are persisted separately from merge-readiness analysis so operators can inspect candidate-branch results and conflicts after the fact.
 
 ## Repo policy
 
@@ -101,6 +104,13 @@ FelixAI validates that the target path is a Git repository and that the selected
 - FelixAI records per-branch remote metadata, including preferred remote name, remote branch name, and local-vs-remote push status.
 - Remote metadata is derived from local Git refs, so it works without requiring a live GitHub API call during job inspection.
 - FelixAI also derives per-issue run summaries that aggregate work items, branches, and latest work-item responses for relay-side display later.
+- `felixai job push <job-id>` pushes completed work-item branches and refreshes remote tracking state.
+
+## Merge automation
+
+- `felixai job merge <job-id>` creates a merge-candidate branch off the target branch rather than merging directly into the base branch.
+- FelixAI attempts merges sequentially into that candidate branch and records either a merged result or explicit conflict details.
+- Conflict results are preserved in job state so a future relay or local operator can inspect the candidate branch and decide what to do next.
 
 ## Workspace lifecycle
 

@@ -194,6 +194,10 @@ function mergeJobStates(current: JobState, incoming: JobState): JobState {
         incoming.mergeReadiness.branchReadiness.length > 0 ? incoming.mergeReadiness.branchReadiness : current.mergeReadiness.branchReadiness,
       generatedAt: incoming.mergeReadiness.generatedAt ?? current.mergeReadiness.generatedAt
     },
+    mergeAutomation:
+      incoming.mergeAutomation.attemptedAt || incoming.mergeAutomation.error || incoming.mergeAutomation.mergedBranches.length > 0
+        ? incoming.mergeAutomation
+        : current.mergeAutomation,
     remoteBranches: incoming.remoteBranches.length > 0 ? incoming.remoteBranches : current.remoteBranches,
     issueSummaries: incoming.issueSummaries.length > 0 ? incoming.issueSummaries : current.issueSummaries,
     updatedAt: incoming.updatedAt > current.updatedAt ? incoming.updatedAt : current.updatedAt,

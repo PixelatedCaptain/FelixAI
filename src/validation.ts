@@ -99,7 +99,17 @@ export function migrateJobState(raw: unknown): JobState {
 
   const schemaVersion = raw.schemaVersion;
   if (schemaVersion === undefined || schemaVersion === STATE_SCHEMA_VERSION) {
-    return raw as unknown as JobState;
+    const migrated = { ...raw } as Record<string, unknown>;
+    if (!isRecord(migrated.mergeAutomation)) {
+      migrated.mergeAutomation = {
+        targetBranch: typeof migrated.baseBranch === "string" ? migrated.baseBranch : "main",
+        mergedBranches: [],
+        pendingBranches: [],
+        conflicts: [],
+        status: "pending"
+      };
+    }
+    return migrated as unknown as JobState;
   }
 
   throw new Error(`Unsupported FelixAI job state schema version '${String(schemaVersion)}'.`);
@@ -142,6 +152,34 @@ export function validateJobState(job: JobState): JobState {
     assertString(branch.branchName, "Each branch readiness entry must include branchName.");
     assertStringArray(branch.changedFiles, "Each branch readiness changedFiles value must be an array of strings.");
     assertStringArray(branch.conflictWith, "Each branch readiness conflictWith value must be an array of strings.");
+  }
+  assertRecord(job.mergeAutomation, "Job state mergeAutomation must be an object.");
+  if (job.mergeAutomation.mergeBranchName !== undefined) {
+    assertString(job.mergeAutomation.mergeBranchName, "Job state mergeAutomation.mergeBranchName must be a non-empty string when present.");
+  }
+  assertString(job.mergeAutomation.targetBranch, "Job state mergeAutomation.targetBranch must be a non-empty string.");
+  assertStringArray(job.mergeAutomation.mergedBranches, "Job state mergeAutomation.mergedBranches must be an array of strings.");
+  assertStringArray(job.mergeAutomation.pendingBranches, "Job state mergeAutomation.pendingBranches must be an array of strings.");
+  assertEnum(job.mergeAutomation.status, ["pending", "merged", "conflicted", "failed"], "Job state mergeAutomation.status is invalid.");
+  if (job.mergeAutomation.workspacePath !== undefined) {
+    assertString(job.mergeAutomation.workspacePath, "Job state mergeAutomation.workspacePath must be a non-empty string when present.");
+  }
+  if (job.mergeAutomation.attemptedAt !== undefined) {
+    assertString(job.mergeAutomation.attemptedAt, "Job state mergeAutomation.attemptedAt must be a non-empty string when present.");
+  }
+  if (job.mergeAutomation.completedAt !== undefined) {
+    assertString(job.mergeAutomation.completedAt, "Job state mergeAutomation.completedAt must be a non-empty string when present.");
+  }
+  if (job.mergeAutomation.error !== undefined) {
+    assertString(job.mergeAutomation.error, "Job state mergeAutomation.error must be a non-empty string when present.");
+  }
+  if (!Array.isArray(job.mergeAutomation.conflicts)) {
+    throw new Error("Job state mergeAutomation.conflicts must be an array.");
+  }
+  for (const conflict of job.mergeAutomation.conflicts) {
+    assertRecord(conflict, "Each merge conflict entry must be an object.");
+    assertString(conflict.sourceBranch, "Each merge conflict entry must include sourceBranch.");
+    assertStringArray(conflict.files, "Each merge conflict entry files must be an array of strings.");
   }
   if (!Array.isArray(job.remoteBranches)) {
     throw new Error("Job state remoteBranches must be an array.");

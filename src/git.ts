@@ -1,4 +1,7 @@
+import path from "node:path";
+
 import { runCommand } from "./process-utils.js";
+import { ensureDirectory } from "./fs-utils.js";
 import type { PushStatus } from "./types.js";
 
 export interface WorktreeEntry {
@@ -143,6 +146,40 @@ export async function getRemoteUrl(repoPath: string, remoteName: string): Promis
   } catch {
     return undefined;
   }
+}
+
+export async function pushBranch(repoPath: string, branchName: string, remoteName: string): Promise<void> {
+  await runCommand("git", ["-C", repoPath, "push", "--set-upstream", remoteName, branchName]);
+}
+
+export async function createMergeWorktree(
+  repoPath: string,
+  workspacePath: string,
+  mergeBranchName: string,
+  baseBranch: string
+): Promise<void> {
+  await ensureDirectory(path.dirname(workspacePath));
+  await createWorktree(repoPath, workspacePath, mergeBranchName, baseBranch);
+}
+
+export async function mergeBranchIntoCurrent(repoPath: string, branchName: string): Promise<void> {
+  await runCommand("git", ["-C", repoPath, "merge", "--no-ff", "--no-edit", branchName]);
+}
+
+export async function abortMerge(repoPath: string): Promise<void> {
+  await runCommand("git", ["-C", repoPath, "merge", "--abort"]);
+}
+
+export async function listConflictedFiles(repoPath: string): Promise<string[]> {
+  const result = await runCommand("git", ["-C", repoPath, "diff", "--name-only", "--diff-filter=U"]);
+  if (!result.stdout) {
+    return [];
+  }
+
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 }
 
 export async function getBranchPushStatus(

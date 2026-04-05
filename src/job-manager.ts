@@ -3,14 +3,19 @@ import path from "node:path";
 
 import { loadConfig } from "./config.js";
 import {
+  abortMerge,
   assertGitRepository,
   baseBranchExists,
+  createMergeWorktree,
   getBranchPushStatus,
   getCurrentBranch,
   getPreferredRemote,
   getRemoteUrl,
   isWorkingTreeDirty,
+  listConflictedFiles,
   listChangedFiles,
+  mergeBranchIntoCurrent,
+  pushBranch,
   resolveGitRoot
 } from "./git.js";
 import { StateStore } from "./state-store.js";
@@ -26,6 +31,7 @@ import {
   type IssueRunSummary,
   type JobStartRequest,
   type JobState,
+  type MergeAutomationState,
   type PlanResult,
   type PlannedWorkItem,
   type RemoteBranchState,
@@ -47,6 +53,8 @@ export interface JobManagerDependencies {
   config: FelixConfig;
   analyzeMergeReadiness?: (job: JobState) => Promise<JobState["mergeReadiness"]>;
   analyzeRemoteBranches?: (job: JobState) => Promise<JobState["remoteBranches"]>;
+  pushWorkItemBranches?: (job: JobState, options?: { workItemIds?: string[]; remoteName?: string }) => Promise<JobState["remoteBranches"]>;
+  runMergeAutomation?: (job: JobState, options?: { workItemIds?: string[]; targetBranch?: string }) => Promise<MergeAutomationState>;
   resolveRepoContext: (
     repoPath: string,
     requestedBaseBranch?: string,
@@ -68,6 +76,16 @@ function workItemFromPlan(item: PlannedWorkItem): WorkItemState {
     issueRefs: item.issueRefs ?? [],
     status: "pending",
     attempts: 0
+  };
+}
+
+function createEmptyMergeAutomation(targetBranch: string): MergeAutomationState {
+  return {
+    targetBranch,
+    mergedBranches: [],
+    pendingBranches: [],
+    conflicts: [],
+    status: "pending"
   };
 }
 
@@ -359,6 +377,7 @@ export class JobManager {
         pendingBranches: [],
         branchReadiness: []
       },
+      mergeAutomation: createEmptyMergeAutomation(baseBranch),
       remoteBranches: [],
       issueSummaries: [],
       createdAt,
@@ -417,6 +436,45 @@ export class JobManager {
 
   async listJobs(): Promise<JobState[]> {
     return this.deps.store.listJobs();
+  }
+
+  async pushJobBranches(jobId: string, options?: { workItemIds?: string[]; remoteName?: string }): Promise<JobState> {
+    let job = await this.deps.store.loadJob(jobId);
+    job.remoteBranches = this.deps.pushWorkItemBranches
+      ? await this.deps.pushWorkItemBranches(job, options)
+      : await this.pushBranchesDefault(job, options);
+    job.issueSummaries = buildIssueSummaries(job);
+    job = addEvent(job, "info", "job", "Pushed completed branches and refreshed remote branch state.");
+    await this.deps.store.saveJob(job);
+    return job;
+  }
+
+  async mergeJobBranches(jobId: string, options?: { workItemIds?: string[]; targetBranch?: string }): Promise<JobState> {
+    let job = await this.deps.store.loadJob(jobId);
+    job.mergeAutomation = this.deps.runMergeAutomation
+      ? await this.deps.runMergeAutomation(job, options)
+      : await this.runMergeAutomationDefault(job, options);
+
+    if (job.mergeAutomation.status === "merged") {
+      job = addEvent(
+        job,
+        "info",
+        "job",
+        `Merge automation created '${job.mergeAutomation.mergeBranchName}' with ${job.mergeAutomation.mergedBranches.length} merged branch(es).`
+      );
+    } else if (job.mergeAutomation.status === "conflicted") {
+      job = addEvent(
+        job,
+        "warn",
+        "job",
+        `Merge automation hit conflicts on ${job.mergeAutomation.conflicts.map((entry) => entry.sourceBranch).join(", ")}.`
+      );
+    } else {
+      job = addEvent(job, "error", "job", `Merge automation failed: ${job.mergeAutomation.error ?? "unknown error"}`);
+    }
+
+    await this.deps.store.saveJob(job);
+    return job;
   }
 
   private async runJob(jobId: string, includeBoundary = false): Promise<JobState> {
@@ -518,6 +576,84 @@ export class JobManager {
     job.remoteBranches = await this.getRemoteBranches(job);
     job.issueSummaries = buildIssueSummaries(job);
     return job;
+  }
+
+  private async pushBranchesDefault(job: JobState, options?: { workItemIds?: string[]; remoteName?: string }): Promise<JobState["remoteBranches"]> {
+    const remoteName = options?.remoteName ?? (await getPreferredRemote(job.repoRoot));
+    if (!remoteName) {
+      throw new Error(`No Git remote is configured for repository '${job.repoRoot}'.`);
+    }
+
+    const selected = job.workItems.filter(
+      (item) =>
+        item.status === "completed" &&
+        item.branchName &&
+        (!options?.workItemIds || options.workItemIds.includes(item.id))
+    );
+    if (selected.length === 0) {
+      return this.getRemoteBranches(job);
+    }
+
+    for (const item of selected) {
+      await pushBranch(job.repoRoot, item.branchName as string, remoteName);
+    }
+
+    return this.getRemoteBranches(job);
+  }
+
+  private async runMergeAutomationDefault(job: JobState, options?: { workItemIds?: string[]; targetBranch?: string }): Promise<MergeAutomationState> {
+    const targetBranch = options?.targetBranch ?? job.baseBranch;
+    const mergeAutomation = createEmptyMergeAutomation(targetBranch);
+    mergeAutomation.mergeBranchName = `agent/merge/job-${job.jobId.slice(0, 8)}`;
+    mergeAutomation.workspacePath = path.join(path.resolve(job.repoPath), ".felixai", "merges", job.jobId);
+    mergeAutomation.attemptedAt = now();
+
+    const selected = job.workItems.filter(
+      (item) =>
+        item.status === "completed" &&
+        item.branchName &&
+        (!options?.workItemIds || options.workItemIds.includes(item.id))
+    );
+    mergeAutomation.pendingBranches = selected.map((item) => item.branchName as string);
+
+    if (selected.length === 0) {
+      mergeAutomation.status = "failed";
+      mergeAutomation.error = "No completed branches are available to merge.";
+      mergeAutomation.completedAt = now();
+      return mergeAutomation;
+    }
+
+    try {
+      await createMergeWorktree(job.repoRoot, mergeAutomation.workspacePath, mergeAutomation.mergeBranchName, targetBranch);
+      for (const item of selected) {
+        const branchName = item.branchName as string;
+        try {
+          await mergeBranchIntoCurrent(mergeAutomation.workspacePath, branchName);
+          mergeAutomation.mergedBranches.push(branchName);
+          mergeAutomation.pendingBranches = mergeAutomation.pendingBranches.filter((entry) => entry !== branchName);
+        } catch (error) {
+          mergeAutomation.conflicts.push({
+            sourceBranch: branchName,
+            files: await listConflictedFiles(mergeAutomation.workspacePath).catch(() => [])
+          });
+          mergeAutomation.pendingBranches = mergeAutomation.pendingBranches.filter((entry) => entry !== branchName);
+          mergeAutomation.status = "conflicted";
+          mergeAutomation.error = error instanceof Error ? error.message : String(error);
+          await abortMerge(mergeAutomation.workspacePath).catch(() => undefined);
+          mergeAutomation.completedAt = now();
+          return mergeAutomation;
+        }
+      }
+
+      mergeAutomation.status = "merged";
+      mergeAutomation.completedAt = now();
+      return mergeAutomation;
+    } catch (error) {
+      mergeAutomation.status = "failed";
+      mergeAutomation.error = error instanceof Error ? error.message : String(error);
+      mergeAutomation.completedAt = now();
+      return mergeAutomation;
+    }
   }
 
   private async executeSingleItem(jobId: string, workItemId: string): Promise<JobState> {

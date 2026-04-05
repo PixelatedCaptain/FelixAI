@@ -91,8 +91,9 @@ FelixAI Orchestrator is a locally installed CLI-driven orchestration engine that
 - per-issue run summaries for relay consumption: implemented
 - workspace reuse/reattachment and conflict classification: implemented
 - blocked/manual-review execution classification: implemented
-- merge automation: not yet implemented
-- branch push execution: not yet implemented
+- branch push execution from the CLI: implemented
+- merge-candidate automation with persisted conflict state: implemented
+- direct-to-base merge automation: not yet implemented
 - conflict resolution workflow: not yet implemented
 
 ## Delivery tracking
