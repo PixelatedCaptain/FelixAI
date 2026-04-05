@@ -20,6 +20,20 @@ async function createFakeWorkspace(root: string, jobId: string, workItemId: stri
   };
 }
 
+async function createFakeWorkspaceForIssues(
+  root: string,
+  jobId: string,
+  workItemId: string,
+  issueRefs: string[] = []
+): Promise<WorkspaceAssignment> {
+  const workspace = await createFakeWorkspace(root, jobId, workItemId);
+  const issueToken = issueRefs[0] ? `issue-${issueRefs[0].toLowerCase().replace(/[^a-z0-9]+/g, "-")}` : workItemId;
+  return {
+    ...workspace,
+    branchName: `agent/${issueToken}/job-${jobId.slice(0, 8)}-${workItemId}`
+  };
+}
+
 async function testInit(): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "felix-init-"));
   const result = await initializeProject({ projectRoot: root });
@@ -171,8 +185,10 @@ async function testInvalidStateFailsValidation(): Promise<void> {
     events: [],
     mergeReadiness: {
       completedBranches: [],
-      pendingBranches: []
+      pendingBranches: [],
+      branchReadiness: []
     },
+    issueRefs: [],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
@@ -389,6 +405,114 @@ async function testMergeReadinessIsPersisted(): Promise<void> {
   assert.equal(job.mergeReadiness.branchReadiness[0].conflictWith.length > 0, true);
 }
 
+async function testSchedulerStartsDependentWorkWithoutWaitingForWholeWave(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-scheduler-"));
+  await ensureFelixDirectories(root);
+  const started: string[] = [];
+  const resolvers = new Map<string, () => void>();
+
+  const manager = new JobManager({
+    config: {
+      ...DEFAULT_CONFIG,
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        parallelism: 2
+      }
+    },
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId, _baseBranch, _repoRoot, issueRefs) =>
+        createFakeWorkspaceForIssues(root, jobId, workItemId, issueRefs)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "scheduler",
+      workItems: [
+        { id: "a", title: "A", prompt: "A", dependsOn: [] },
+        { id: "b", title: "B", prompt: "B", dependsOn: [] },
+        { id: "c", title: "C", prompt: "C", dependsOn: ["a"] }
+      ]
+    }),
+    executor: async ({ prompt }): Promise<ExecutionResult> =>
+      new Promise((resolve) => {
+        started.push(prompt.toLowerCase());
+        resolvers.set(prompt.toLowerCase(), () =>
+          resolve({
+            status: "completed",
+            summary: prompt,
+            sessionId: `session-${prompt.toLowerCase()}`
+          })
+        );
+      })
+  });
+
+  const jobPromise = manager.startJob({
+    repoPath: root,
+    task: "scheduler"
+  });
+
+  while (!(started.includes("a") && started.includes("b"))) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  resolvers.get("a")?.();
+
+  while (!started.includes("c")) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  assert.equal(started.includes("c"), true);
+  resolvers.get("b")?.();
+  resolvers.get("c")?.();
+  const job = await jobPromise;
+  assert.equal(job.status, "completed");
+}
+
+async function testIssueRefsPropagateToJobsAndBranches(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-issues-"));
+  await ensureFelixDirectories(root);
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId, _baseBranch, _repoRoot, issueRefs) =>
+        createFakeWorkspaceForIssues(root, jobId, workItemId, issueRefs)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "issues",
+      workItems: [
+        { id: "api", title: "API", prompt: "API", dependsOn: [], issueRefs: ["142"] },
+        { id: "ui", title: "UI", prompt: "UI", dependsOn: [] }
+      ]
+    }),
+    executor: async ({ workspacePath }): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: workspacePath,
+      sessionId: `session-${path.basename(workspacePath)}`
+    })
+  });
+
+  const job = await manager.startJob({
+    repoPath: root,
+    task: "issue refs",
+    issueRefs: ["999"]
+  });
+
+  assert.deepEqual(job.issueRefs, ["999"]);
+  assert.deepEqual(job.workItems.find((item) => item.id === "api")?.issueRefs, ["142"]);
+  assert.deepEqual(job.workItems.find((item) => item.id === "ui")?.issueRefs, ["999"]);
+  assert.match(job.workItems.find((item) => item.id === "api")?.branchName ?? "", /issue-142/);
+}
+
 async function main(): Promise<void> {
   await testInit();
   await testInvalidConfigFailsValidation();
@@ -401,6 +525,8 @@ async function main(): Promise<void> {
   await testMissingDependencyFails();
   await testCircularDependencyFails();
   await testMergeReadinessIsPersisted();
+  await testSchedulerStartsDependentWorkWithoutWaitingForWholeWave();
+  await testIssueRefsPropagateToJobsAndBranches();
   console.log("job manager tests passed");
 }
 

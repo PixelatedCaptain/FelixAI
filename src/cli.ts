@@ -17,7 +17,7 @@ Usage:
   felixai init [--force]
   felixai config show
   felixai version
-  felixai job start --repo <path> (--task "<large task>" | --task-file <file>) [--base-branch <branch>] [--parallel <n>] [--auto-resume] [--require-clean]
+  felixai job start --repo <path> (--task "<large task>" | --task-file <file>) [--base-branch <branch>] [--parallel <n>] [--auto-resume] [--require-clean] [--issue <id>]
   felixai job status <job-id> [--json]
   felixai job resume <job-id>
   felixai job list [--json]
@@ -28,6 +28,7 @@ Examples:
   felixai job start --repo . --task "Build the next milestone"
   felixai job start --repo . --task-file ./felixai.task.json --parallel 3 --auto-resume
   felixai job start --repo . --task "Refactor auth" --require-clean
+  felixai job start --repo . --task "Implement GH issue" --issue 142 --issue api-hardening
 `);
 }
 
@@ -63,6 +64,19 @@ function parseInteger(value: string | undefined): number | undefined {
   }
 
   return parsed;
+}
+
+function getMultiFlagValues(args: string[], flag: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === flag) {
+      const next = args[index + 1];
+      if (next && !next.startsWith("--")) {
+        values.push(next);
+      }
+    }
+  }
+  return values;
 }
 
 function summarizeJob(job: JobState): {
@@ -147,16 +161,21 @@ async function main(): Promise<void> {
           const parallelism = parseInteger(getFlagValue(jobArgs, "--parallel"));
           const autoResume = hasFlag(jobArgs, "--auto-resume");
           const requireClean = hasFlag(jobArgs, "--require-clean");
+          const issueRefs = getMultiFlagValues(jobArgs, "--issue");
           const job = await manager.startJob({
             repoPath,
             task,
             baseBranch,
             parallelism,
             autoResume,
-            requireClean
+            requireClean,
+            issueRefs
           });
           console.log(`[felixai] job ${job.jobId} status: ${job.status}`);
           console.log(`[felixai] planner summary: ${job.planningSummary ?? "n/a"}`);
+          if (job.issueRefs.length > 0) {
+            console.log(`[felixai] issue refs: ${job.issueRefs.join(", ")}`);
+          }
           return;
         }
         case "status": {
@@ -172,6 +191,9 @@ async function main(): Promise<void> {
           console.log(`[felixai] status: ${job.status}`);
           console.log(`[felixai] repo: ${job.repoRoot}`);
           console.log(`[felixai] base branch: ${job.baseBranch}`);
+          if (job.issueRefs.length > 0) {
+            console.log(`[felixai] issue refs: ${job.issueRefs.join(", ")}`);
+          }
           console.log(`[felixai] planning summary: ${job.planningSummary ?? "n/a"}`);
           console.log(
             `[felixai] work items: pending=${summary.pending} running=${summary.running} boundary=${summary.boundary} completed=${summary.completed} failed=${summary.failed}`
@@ -194,7 +216,8 @@ async function main(): Promise<void> {
               `session=${session?.sessionId ?? item.sessionId ?? "session-pending"}`,
               `attempts=${item.attempts}`
             ].join(" ");
-            console.log(`[felixai] ${item.id}: ${item.status} ${details}`);
+            const issueInfo = item.issueRefs && item.issueRefs.length > 0 ? ` issues=${item.issueRefs.join(",")}` : "";
+            console.log(`[felixai] ${item.id}: ${item.status} ${details}${issueInfo}`);
           }
           const recentEvents = job.events.slice(-5);
           if (recentEvents.length > 0) {

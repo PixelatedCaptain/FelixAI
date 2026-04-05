@@ -40,6 +40,13 @@ function assertStringArray(value: unknown, message: string): asserts value is st
   }
 }
 
+function assertOptionalStringArray(value: unknown, message: string): asserts value is string[] | undefined {
+  if (value === undefined) {
+    return;
+  }
+  assertStringArray(value, message);
+}
+
 function assertEnum<T extends string>(value: unknown, allowed: readonly T[], message: string): asserts value is T {
   if (typeof value !== "string" || !allowed.includes(value as T)) {
     throw new Error(`${message} Allowed values: ${allowed.join(", ")}`);
@@ -106,6 +113,7 @@ export function validateJobState(job: JobState): JobState {
   assertString(job.repoPath, "Job state repoPath must be a non-empty string.");
   assertString(job.repoRoot, "Job state repoRoot must be a non-empty string.");
   assertString(job.task, "Job state task must be a non-empty string.");
+  assertStringArray(job.issueRefs, "Job state issueRefs must be an array of strings.");
   assertString(job.baseBranch, "Job state baseBranch must be a non-empty string.");
   assertPositiveInteger(job.parallelism, "Job state parallelism must be a positive integer.");
   assertBoolean(job.autoResume, "Job state autoResume must be a boolean.");
@@ -146,6 +154,7 @@ export function validateJobState(job: JobState): JobState {
     assertEnum(item.status, ["pending", "running", "boundary", "completed", "failed"], `Work item '${item.id}' has an invalid status.`);
     assertNonNegativeInteger(item.attempts, `Work item '${item.id}' attempts must be zero or greater.`);
     assertStringArray(item.dependsOn, `Work item '${item.id}' dependsOn must be an array of strings.`);
+    assertOptionalStringArray(item.issueRefs, `Work item '${item.id}' issueRefs must be an array of strings when present.`);
   }
 
   for (const session of job.sessions) {
@@ -210,6 +219,7 @@ function validatePlannedWorkItem(item: PlannedWorkItem): void {
   assertString(item.title, "Each planner work item must include title.");
   assertString(item.prompt, "Each planner work item must include prompt.");
   assertStringArray(item.dependsOn, `Planner work item '${item.id}' dependsOn must be an array of strings.`);
+  assertOptionalStringArray(item.issueRefs, `Planner work item '${item.id}' issueRefs must be an array of strings when present.`);
 }
 
 function assertAcyclicPlan(workItems: PlannedWorkItem[]): void {

@@ -15,9 +15,11 @@ export class WorkspaceManager {
     jobId: string,
     workItemId: string,
     baseBranch: string,
-    repoRoot: string
+    repoRoot: string,
+    issueRefs: string[] = []
   ): Promise<WorkspaceAssignment> {
-    const branchName = `agent/${slugify(workItemId)}/job-${jobId.slice(0, 8)}`;
+    const issueToken = issueRefs[0] ? `issue-${slugify(issueRefs[0])}` : slugify(workItemId);
+    const branchName = `agent/${issueToken}/job-${jobId.slice(0, 8)}-${slugify(workItemId)}`;
     const workspacePath = path.join(this.workspaceRoot, jobId, slugify(workItemId));
     await ensureDirectory(path.dirname(workspacePath));
 

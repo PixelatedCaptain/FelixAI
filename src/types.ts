@@ -37,6 +37,7 @@ export interface JobStartRequest {
   parallelism?: number;
   autoResume?: boolean;
   requireClean?: boolean;
+  issueRefs?: string[];
 }
 
 export interface PlannedWorkItem {
@@ -44,6 +45,7 @@ export interface PlannedWorkItem {
   title: string;
   prompt: string;
   dependsOn: string[];
+  issueRefs?: string[];
 }
 
 export interface PlanResult {
@@ -105,6 +107,7 @@ export interface JobState {
   repoPath: string;
   repoRoot: string;
   task: string;
+  issueRefs: string[];
   baseBranch: string;
   parallelism: number;
   autoResume: boolean;

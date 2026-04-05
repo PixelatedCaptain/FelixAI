@@ -61,6 +61,7 @@ felixai version
 felixai job start --repo . --task "Build the first milestone"
 felixai job start --repo . --task-file ./felixai.task.json
 felixai job start --repo . --task "Refactor auth" --require-clean
+felixai job start --repo . --task "Implement issue" --issue 142 --issue api-hardening
 felixai job status <job-id>
 felixai job status <job-id> --json
 felixai job list
@@ -85,6 +86,12 @@ FelixAI validates that the target path is a Git repository and that the selected
 
 - By default, dirty working trees are allowed.
 - Use `--require-clean` on `job start` to block execution when the repo has uncommitted changes.
+
+## Issue traceability
+
+- Use `--issue <id>` on `job start` to attach one or more issue references to the job.
+- Planner work items can also include issue references.
+- FelixAI carries issue references into persisted state, CLI output, and branch naming when available.
 
 ## Repo Docs
 

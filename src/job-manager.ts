@@ -51,6 +51,7 @@ function createJobId(): string {
 function workItemFromPlan(item: PlannedWorkItem): WorkItemState {
   return {
     ...item,
+    issueRefs: item.issueRefs ?? [],
     status: "pending",
     attempts: 0
   };
@@ -220,6 +221,7 @@ export class JobManager {
       repoPath: path.resolve(request.repoPath),
       repoRoot,
       task: request.task,
+      issueRefs: request.issueRefs ?? [],
       baseBranch,
       parallelism: request.parallelism ?? this.deps.config.codex.parallelism,
       autoResume: request.autoResume ?? this.deps.config.codex.autoResume,
@@ -249,6 +251,7 @@ export class JobManager {
       repoRoot,
       baseBranch,
       task: request.task,
+      issueRefs: request.issueRefs ?? [],
       createdAt: now(),
       plan
     });
@@ -261,7 +264,12 @@ export class JobManager {
       status: "ready",
       planningSummary: plan.summary,
       updatedAt: now(),
-      workItems: plan.workItems.map(workItemFromPlan)
+      workItems: plan.workItems.map((item) =>
+        workItemFromPlan({
+          ...item,
+          issueRefs: item.issueRefs && item.issueRefs.length > 0 ? item.issueRefs : request.issueRefs ?? []
+        })
+      )
     };
     job = addEvent(job, "info", "planner", `Planner produced ${plan.workItems.length} work items.`);
     await this.deps.store.saveJob(job);
@@ -287,11 +295,23 @@ export class JobManager {
 
   private async runJob(jobId: string, includeBoundary = false): Promise<JobState> {
     let job = await this.deps.store.loadJob(jobId);
+    const inFlight = new Map<string, Promise<void>>();
 
     while (true) {
-      const ready = eligibleItems(job, includeBoundary).slice(0, job.parallelism);
+      const ready = eligibleItems(job, includeBoundary).filter((item) => !inFlight.has(item.id));
       const blocked = blockedItems(job, includeBoundary);
-      if (ready.length === 0) {
+      while (ready.length > 0 && inFlight.size < job.parallelism) {
+        const item = ready.shift();
+        if (!item) {
+          break;
+        }
+        const task = this.executeSingleItem(jobId, item.id).then(() => {
+          inFlight.delete(item.id);
+        });
+        inFlight.set(item.id, task);
+      }
+
+      if (inFlight.size === 0) {
         job.mergeReadiness = await this.getMergeReadiness(job);
         if (job.mergeReadiness.branchReadiness.some((entry) => entry.conflictWith.length > 0)) {
           job = addEvent(job, "warn", "job", "Merge readiness detected overlapping branch file changes that may conflict.");
@@ -309,16 +329,13 @@ export class JobManager {
         return job;
       }
 
-      job = addEvent(
-        job,
-        "info",
-        "job",
-        `Dispatching ${ready.length} work item(s): ${ready.map((item) => item.id).join(", ")}`
-      );
+      job = await this.deps.store.loadJob(jobId);
+      const activeIds = [...inFlight.keys()];
+      job = addEvent(job, "info", "job", `Scheduler in-flight=${activeIds.length} active=${activeIds.join(", ")}`);
       job.status = "running";
       await this.deps.store.saveJob(job);
 
-      await Promise.all(ready.map((item) => this.executeSingleItem(jobId, item.id)));
+      await Promise.race(inFlight.values());
       job = await this.deps.store.loadJob(jobId);
       includeBoundary = job.autoResume;
     }
@@ -369,7 +386,13 @@ export class JobManager {
       throw new Error(`Unknown work item '${workItemId}'.`);
     }
 
-    const workspace = await this.deps.workspaceManager.ensureWorkspace(job.jobId, item.id, job.baseBranch, job.repoRoot);
+    const workspace = await this.deps.workspaceManager.ensureWorkspace(
+      job.jobId,
+      item.id,
+      job.baseBranch,
+      job.repoRoot,
+      item.issueRefs ?? []
+    );
     let updatedItem: WorkItemState = {
       ...item,
       workspacePath: workspace.workspacePath,

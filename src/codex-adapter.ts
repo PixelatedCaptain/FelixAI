@@ -14,6 +14,10 @@ const PLAN_SCHEMA = {
           id: { type: "string" },
           title: { type: "string" },
           prompt: { type: "string" },
+          issueRefs: {
+            type: "array",
+            items: { type: "string" }
+          },
           dependsOn: {
             type: "array",
             items: { type: "string" }
@@ -60,6 +64,7 @@ export class CodexAdapter {
       "Break the large engineering task into work items that are each reasonable for one Codex session.",
       "Prefer 2-6 work items unless the task is trivial.",
       "Keep dependencies explicit in dependsOn.",
+      "If issue references are known, include them in issueRefs as strings like '123' or 'GH-123'.",
       `Base branch: ${baseBranch}.`,
       `Task: ${task}`
     ].join("\n\n");
