@@ -44,11 +44,14 @@ export class JobLogger {
       status: job.status,
       updatedAt: job.updatedAt,
       totalEvents: job.events.length,
+      remoteBranches: job.remoteBranches,
+      issueSummaries: job.issueSummaries,
       workItems: job.workItems.map((item) => ({
         id: item.id,
         status: item.status,
         branchName: item.branchName ?? null,
-        sessionId: item.sessionId ?? null
+        sessionId: item.sessionId ?? null,
+        issueRefs: item.issueRefs ?? []
       }))
     });
   }

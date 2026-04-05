@@ -177,12 +177,14 @@ function deriveStatus(job: JobState): JobState["status"] {
 
 function mergeJobStates(current: JobState, incoming: JobState): JobState {
   const workItems = mergeWorkItems(current.workItems, incoming.workItems);
+  const sessions = mergeSessions(current.sessions, incoming.sessions);
+  const events = mergeEvents(current.events, incoming.events);
   return {
     ...current,
     ...incoming,
     workItems,
-    sessions: mergeSessions(current.sessions, incoming.sessions),
-    events: mergeEvents(current.events, incoming.events),
+    sessions,
+    events,
     mergeReadiness: {
       completedBranches: workItems.filter((item) => item.status === "completed" && item.branchName).map((item) => item.branchName as string),
       pendingBranches: workItems.filter((item) => item.status !== "completed" && item.branchName).map((item) => item.branchName as string),
@@ -190,12 +192,14 @@ function mergeJobStates(current: JobState, incoming: JobState): JobState {
         incoming.mergeReadiness.branchReadiness.length > 0 ? incoming.mergeReadiness.branchReadiness : current.mergeReadiness.branchReadiness,
       generatedAt: incoming.mergeReadiness.generatedAt ?? current.mergeReadiness.generatedAt
     },
+    remoteBranches: incoming.remoteBranches.length > 0 ? incoming.remoteBranches : current.remoteBranches,
+    issueSummaries: incoming.issueSummaries.length > 0 ? incoming.issueSummaries : current.issueSummaries,
     updatedAt: incoming.updatedAt > current.updatedAt ? incoming.updatedAt : current.updatedAt,
     status: deriveStatus({
       ...incoming,
       workItems,
-      sessions: mergeSessions(current.sessions, incoming.sessions),
-      events: mergeEvents(current.events, incoming.events)
+      sessions,
+      events
     })
   };
 }

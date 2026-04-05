@@ -79,6 +79,7 @@ FelixAI persists:
 - per-job log summaries under `.felixai/logs/jobs/*.summary.json`
 
 `job status` also surfaces merge-readiness hints for completed branches, including likely overlaps in changed files.
+It also persists per-branch remote push status and issue-linked run summaries for later relay/dashboard use.
 
 ## Repo policy
 
@@ -92,6 +93,12 @@ FelixAI validates that the target path is a Git repository and that the selected
 - Use `--issue <id>` on `job start` to attach one or more issue references to the job.
 - Planner work items can also include issue references.
 - FelixAI carries issue references into persisted state, CLI output, and branch naming when available.
+
+## GitHub alignment
+
+- FelixAI records per-branch remote metadata, including preferred remote name, remote branch name, and local-vs-remote push status.
+- Remote metadata is derived from local Git refs, so it works without requiring a live GitHub API call during job inspection.
+- FelixAI also derives per-issue run summaries that aggregate work items, branches, and latest work-item responses for relay-side display later.
 
 ## Repo Docs
 

@@ -2,7 +2,17 @@ import crypto from "node:crypto";
 import path from "node:path";
 
 import { loadConfig } from "./config.js";
-import { assertGitRepository, baseBranchExists, getCurrentBranch, isWorkingTreeDirty, listChangedFiles, resolveGitRoot } from "./git.js";
+import {
+  assertGitRepository,
+  baseBranchExists,
+  getBranchPushStatus,
+  getCurrentBranch,
+  getPreferredRemote,
+  getRemoteUrl,
+  isWorkingTreeDirty,
+  listChangedFiles,
+  resolveGitRoot
+} from "./git.js";
 import { StateStore } from "./state-store.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { CodexAdapter } from "./codex-adapter.js";
@@ -12,10 +22,12 @@ import {
   type ExecutionResult,
   type FelixConfig,
   type JobEvent,
+  type IssueRunSummary,
   type JobStartRequest,
   type JobState,
   type PlanResult,
   type PlannedWorkItem,
+  type RemoteBranchState,
   type SessionState,
   type WorkItemState
 } from "./types.js";
@@ -33,6 +45,7 @@ export interface JobManagerDependencies {
   store: StateStore;
   config: FelixConfig;
   analyzeMergeReadiness?: (job: JobState) => Promise<JobState["mergeReadiness"]>;
+  analyzeRemoteBranches?: (job: JobState) => Promise<JobState["remoteBranches"]>;
   resolveRepoContext: (
     repoPath: string,
     requestedBaseBranch?: string,
@@ -132,6 +145,52 @@ function recalculateMergeReadiness(workItems: WorkItemState[]): JobState["mergeR
   };
 }
 
+function deriveIssueRunStatus(items: WorkItemState[]): IssueRunSummary["status"] {
+  if (items.some((item) => item.status === "failed" || item.status === "boundary")) {
+    return "blocked";
+  }
+  if (items.every((item) => item.status === "completed")) {
+    return "completed";
+  }
+  if (items.some((item) => item.status === "running" || item.status === "completed")) {
+    return "in_progress";
+  }
+  return "not_started";
+}
+
+function buildIssueSummaries(job: JobState): IssueRunSummary[] {
+  const byIssue = new Map<string, WorkItemState[]>();
+  for (const item of job.workItems) {
+    for (const issueRef of item.issueRefs ?? []) {
+      const items = byIssue.get(issueRef) ?? [];
+      items.push(item);
+      byIssue.set(issueRef, items);
+    }
+  }
+
+  return [...byIssue.entries()]
+    .map(([issueRef, items]) => {
+      const remoteBranches = job.remoteBranches.filter((branch) => items.some((item) => item.id === branch.workItemId));
+      const latestItem = [...items]
+        .filter((item) => item.lastResponse)
+        .sort((left, right) => (right.completedAt ?? right.startedAt ?? "").localeCompare(left.completedAt ?? left.startedAt ?? ""));
+
+      return {
+        issueRef,
+        status: deriveIssueRunStatus(items),
+        workItemIds: items.map((item) => item.id),
+        completedWorkItemIds: items.filter((item) => item.status === "completed").map((item) => item.id),
+        pendingWorkItemIds: items.filter((item) => item.status === "pending" || item.status === "running").map((item) => item.id),
+        failedWorkItemIds: items.filter((item) => item.status === "failed" || item.status === "boundary").map((item) => item.id),
+        branchNames: items.map((item) => item.branchName).filter((value): value is string => Boolean(value)),
+        remoteBranches: remoteBranches.map((branch) => branch.remoteBranchName ?? `${branch.remoteName ?? "local"}/${branch.branchName}`),
+        latestResponse: latestItem[0]?.lastResponse,
+        updatedAt: job.updatedAt
+      } satisfies IssueRunSummary;
+    })
+    .sort((left, right) => left.issueRef.localeCompare(right.issueRef));
+}
+
 function updateWorkItem(job: JobState, workItem: WorkItemState): JobState {
   const workItems = job.workItems.map((item) => (item.id === workItem.id ? workItem : item));
   return {
@@ -185,6 +244,52 @@ export async function createJobManager(projectRoot = process.cwd(), overrides?: 
           generatedAt: now()
         };
       }),
+    analyzeRemoteBranches:
+      overrides?.analyzeRemoteBranches ??
+      (async (job) => {
+        const remoteName = await getPreferredRemote(job.repoRoot);
+        const remoteUrl = remoteName ? await getRemoteUrl(job.repoRoot, remoteName) : undefined;
+        const remoteBranches: RemoteBranchState[] = [];
+
+        for (const item of job.workItems) {
+          if (!item.branchName) {
+            continue;
+          }
+
+          try {
+            const pushState = await getBranchPushStatus(job.repoRoot, item.branchName, remoteName);
+            remoteBranches.push({
+              workItemId: item.id,
+              branchName: item.branchName,
+              issueRefs: item.issueRefs ?? [],
+              remoteName,
+              remoteUrl,
+              remoteBranchName: pushState.remoteBranchName,
+              existsRemotely: pushState.existsRemotely,
+              pushStatus: pushState.pushStatus,
+              aheadBy: pushState.aheadBy,
+              behindBy: pushState.behindBy,
+              checkedAt: now()
+            });
+          } catch {
+            remoteBranches.push({
+              workItemId: item.id,
+              branchName: item.branchName,
+              issueRefs: item.issueRefs ?? [],
+              remoteName,
+              remoteUrl,
+              remoteBranchName: remoteName ? `${remoteName}/${item.branchName}` : undefined,
+              existsRemotely: false,
+              pushStatus: remoteName ? "unknown" : "no-remote",
+              aheadBy: 0,
+              behindBy: 0,
+              checkedAt: now()
+            });
+          }
+        }
+
+        return remoteBranches;
+      }),
     resolveRepoContext:
       overrides?.resolveRepoContext ??
       (async (repoPath, requestedBaseBranch, options) => {
@@ -235,6 +340,8 @@ export class JobManager {
         pendingBranches: [],
         branchReadiness: []
       },
+      remoteBranches: [],
+      issueSummaries: [],
       createdAt,
       updatedAt: createdAt
     };
@@ -312,7 +419,7 @@ export class JobManager {
       }
 
       if (inFlight.size === 0) {
-        job.mergeReadiness = await this.getMergeReadiness(job);
+        job = await this.refreshDerivedState(job);
         if (job.mergeReadiness.branchReadiness.some((entry) => entry.conflictWith.length > 0)) {
           job = addEvent(job, "warn", "job", "Merge readiness detected overlapping branch file changes that may conflict.");
         }
@@ -379,6 +486,21 @@ export class JobManager {
     };
   }
 
+  private async getRemoteBranches(job: JobState): Promise<JobState["remoteBranches"]> {
+    if (this.deps.analyzeRemoteBranches) {
+      return this.deps.analyzeRemoteBranches(job);
+    }
+
+    return [];
+  }
+
+  private async refreshDerivedState(job: JobState): Promise<JobState> {
+    job.mergeReadiness = await this.getMergeReadiness(job);
+    job.remoteBranches = await this.getRemoteBranches(job);
+    job.issueSummaries = buildIssueSummaries(job);
+    return job;
+  }
+
   private async executeSingleItem(jobId: string, workItemId: string): Promise<JobState> {
     let job = await this.deps.store.loadJob(jobId);
     const item = job.workItems.find((entry) => entry.id === workItemId);
@@ -440,6 +562,7 @@ export class JobManager {
           updatedItem.status = "completed";
           updatedItem.completedAt = now();
           job = updateWorkItem(job, updatedItem);
+          job = await this.refreshDerivedState(job);
           job = addEvent(job, "info", "session", `Completed work item '${item.title}'.`, item.id);
           job = updateSession(job, {
             workItemId: item.id,
@@ -461,6 +584,7 @@ export class JobManager {
           resumePrompt = result.nextPrompt ?? "Continue the current work item from the current repo state.";
           updatedItem.attempts += 1;
           job = updateWorkItem(job, updatedItem);
+          job = await this.refreshDerivedState(job);
           job = addEvent(job, "info", "session", "Boundary reached; auto-resuming work item.", item.id);
           job = updateSession(job, {
             workItemId: item.id,
@@ -479,6 +603,7 @@ export class JobManager {
 
         updatedItem.status = "boundary";
         job = updateWorkItem(job, updatedItem);
+        job = await this.refreshDerivedState(job);
         job = addEvent(job, "warn", "session", "Boundary reached; waiting for manual resume.", item.id);
         job = updateSession(job, {
           workItemId: item.id,
@@ -501,6 +626,7 @@ export class JobManager {
         updatedItem.sessionId = sessionId;
         job = await this.deps.store.loadJob(jobId);
         job = updateWorkItem(job, updatedItem);
+        job = await this.refreshDerivedState(job);
         job = addEvent(job, "error", "session", `Work item failed: ${message}`, item.id);
         job = updateSession(job, {
           workItemId: item.id,

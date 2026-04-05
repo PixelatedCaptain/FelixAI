@@ -188,6 +188,8 @@ async function testInvalidStateFailsValidation(): Promise<void> {
       pendingBranches: [],
       branchReadiness: []
     },
+    remoteBranches: [],
+    issueSummaries: [],
     issueRefs: [],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -513,6 +515,81 @@ async function testIssueRefsPropagateToJobsAndBranches(): Promise<void> {
   assert.match(job.workItems.find((item) => item.id === "api")?.branchName ?? "", /issue-142/);
 }
 
+async function testRemoteBranchMetadataAndIssueSummariesPersist(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-remote-"));
+  await ensureFelixDirectories(root);
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store,
+    analyzeRemoteBranches: async () => [
+      {
+        workItemId: "api",
+        branchName: "agent/issue-142/job-12345678-api",
+        issueRefs: ["142"],
+        remoteName: "origin",
+        remoteUrl: "https://github.com/PixelatedCaptain/FelixAI.git",
+        remoteBranchName: "origin/agent/issue-142/job-12345678-api",
+        existsRemotely: true,
+        pushStatus: "ahead-of-remote",
+        aheadBy: 2,
+        behindBy: 0,
+        checkedAt: new Date().toISOString()
+      },
+      {
+        workItemId: "ui",
+        branchName: "agent/issue-999/job-12345678-ui",
+        issueRefs: ["999"],
+        remoteName: "origin",
+        remoteUrl: "https://github.com/PixelatedCaptain/FelixAI.git",
+        remoteBranchName: "origin/agent/issue-999/job-12345678-ui",
+        existsRemotely: false,
+        pushStatus: "branch-not-pushed",
+        aheadBy: 0,
+        behindBy: 0,
+        checkedAt: new Date().toISOString()
+      }
+    ],
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId, _baseBranch, _repoRoot, issueRefs) =>
+        createFakeWorkspaceForIssues(root, jobId, workItemId, issueRefs)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "remote metadata",
+      workItems: [
+        { id: "api", title: "API", prompt: "API", dependsOn: [], issueRefs: ["142"] },
+        { id: "ui", title: "UI", prompt: "UI", dependsOn: [], issueRefs: ["999"] }
+      ]
+    }),
+    executor: async ({ prompt }): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: `${prompt} complete`,
+      sessionId: `session-${prompt.toLowerCase()}`
+    })
+  });
+
+  const job = await manager.startJob({
+    repoPath: root,
+    task: "remote metadata"
+  });
+
+  assert.equal(job.remoteBranches.length, 2);
+  assert.equal(job.remoteBranches.find((branch) => branch.workItemId === "api")?.pushStatus, "ahead-of-remote");
+  assert.equal(job.remoteBranches.find((branch) => branch.workItemId === "ui")?.pushStatus, "branch-not-pushed");
+  assert.equal(job.issueSummaries.length, 2);
+  assert.equal(job.issueSummaries.find((summary) => summary.issueRef === "142")?.status, "completed");
+  assert.match(job.issueSummaries.find((summary) => summary.issueRef === "142")?.remoteBranches[0] ?? "", /origin\/agent\/issue-142/);
+
+  const saved = await readJsonFile<JobState>(path.join(root, ".felixai", "state", "jobs", `${job.jobId}.json`));
+  assert.equal(saved.remoteBranches.length, 2);
+  assert.equal(saved.issueSummaries.length, 2);
+}
+
 async function main(): Promise<void> {
   await testInit();
   await testInvalidConfigFailsValidation();
@@ -527,6 +604,7 @@ async function main(): Promise<void> {
   await testMergeReadinessIsPersisted();
   await testSchedulerStartsDependentWorkWithoutWaitingForWholeWave();
   await testIssueRefsPropagateToJobsAndBranches();
+  await testRemoteBranchMetadataAndIssueSummariesPersist();
   console.log("job manager tests passed");
 }
 

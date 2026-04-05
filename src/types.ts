@@ -7,6 +7,8 @@ export type JobStatus = "planning" | "ready" | "running" | "paused" | "completed
 export type WorkItemStatus = "pending" | "running" | "boundary" | "completed" | "failed";
 export type SessionStatus = "pending" | "running" | "boundary" | "completed" | "failed";
 export type EventLevel = "info" | "warn" | "error";
+export type PushStatus = "no-remote" | "branch-not-pushed" | "up-to-date" | "ahead-of-remote" | "behind-remote" | "diverged" | "unknown";
+export type IssueRunStatus = "not_started" | "in_progress" | "blocked" | "completed";
 
 export interface FelixConfig {
   schemaVersion: number;
@@ -100,6 +102,33 @@ export interface MergeReadiness {
   generatedAt?: string;
 }
 
+export interface RemoteBranchState {
+  workItemId: string;
+  branchName: string;
+  issueRefs: string[];
+  remoteName?: string;
+  remoteUrl?: string;
+  remoteBranchName?: string;
+  existsRemotely: boolean;
+  pushStatus: PushStatus;
+  aheadBy: number;
+  behindBy: number;
+  checkedAt?: string;
+}
+
+export interface IssueRunSummary {
+  issueRef: string;
+  status: IssueRunStatus;
+  workItemIds: string[];
+  completedWorkItemIds: string[];
+  pendingWorkItemIds: string[];
+  failedWorkItemIds: string[];
+  branchNames: string[];
+  remoteBranches: string[];
+  latestResponse?: string;
+  updatedAt: string;
+}
+
 export interface JobState {
   schemaVersion: number;
   jobId: string;
@@ -117,6 +146,8 @@ export interface JobState {
   sessions: SessionState[];
   events: JobEvent[];
   mergeReadiness: MergeReadiness;
+  remoteBranches: RemoteBranchState[];
+  issueSummaries: IssueRunSummary[];
   createdAt: string;
   updatedAt: string;
 }

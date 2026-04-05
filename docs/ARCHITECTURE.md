@@ -50,6 +50,8 @@ Each job persists:
 - session metadata per work item
 - event timeline
 - merge-readiness summary
+- per-branch remote/push metadata derived from local Git refs
+- per-issue run summaries for relay/dashboard consumption later
 
 ## Execution flow
 
@@ -68,13 +70,21 @@ Under `.felixai/`:
 
 - `config.json`
 - `state/jobs/<job-id>.json`
+- `state/plans/<job-id>.plan.json`
 - `workspaces/<job-id>/<work-item-id>/`
 - `logs/`
 
+## GitHub alignment
+
+- FelixAI records issue references at the job and work-item levels.
+- Branch naming should prefer issue-linked traceability when issue references are present.
+- FelixAI derives remote branch status from local Git refs so the relay can show push readiness without needing GitHub API calls.
+- FelixAI derives per-issue summaries from work-item state, branch state, and latest Codex responses.
+
 ## Near-term gaps
 
+- branch push execution workflow
 - merge conflict automation
-- branch push workflow
 - GitHub issue materialization
 - richer log export
 - packaging for MSI/EXE/WinGet

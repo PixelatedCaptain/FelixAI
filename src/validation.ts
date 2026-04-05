@@ -143,6 +143,53 @@ export function validateJobState(job: JobState): JobState {
     assertStringArray(branch.changedFiles, "Each branch readiness changedFiles value must be an array of strings.");
     assertStringArray(branch.conflictWith, "Each branch readiness conflictWith value must be an array of strings.");
   }
+  if (!Array.isArray(job.remoteBranches)) {
+    throw new Error("Job state remoteBranches must be an array.");
+  }
+  for (const branch of job.remoteBranches) {
+    assertRecord(branch, "Each remote branch entry must be an object.");
+    assertString(branch.workItemId, "Each remote branch entry must include workItemId.");
+    assertString(branch.branchName, "Each remote branch entry must include branchName.");
+    assertStringArray(branch.issueRefs, "Each remote branch entry issueRefs must be an array of strings.");
+    if (branch.remoteName !== undefined) {
+      assertString(branch.remoteName, "Each remote branch entry remoteName must be a non-empty string when present.");
+    }
+    if (branch.remoteUrl !== undefined) {
+      assertString(branch.remoteUrl, "Each remote branch entry remoteUrl must be a non-empty string when present.");
+    }
+    if (branch.remoteBranchName !== undefined) {
+      assertString(branch.remoteBranchName, "Each remote branch entry remoteBranchName must be a non-empty string when present.");
+    }
+    assertBoolean(branch.existsRemotely, "Each remote branch entry existsRemotely must be a boolean.");
+    assertEnum(
+      branch.pushStatus,
+      ["no-remote", "branch-not-pushed", "up-to-date", "ahead-of-remote", "behind-remote", "diverged", "unknown"],
+      "Remote branch pushStatus is invalid."
+    );
+    assertNonNegativeInteger(branch.aheadBy, "Each remote branch entry aheadBy must be zero or greater.");
+    assertNonNegativeInteger(branch.behindBy, "Each remote branch entry behindBy must be zero or greater.");
+    if (branch.checkedAt !== undefined) {
+      assertString(branch.checkedAt, "Each remote branch entry checkedAt must be a non-empty string when present.");
+    }
+  }
+  if (!Array.isArray(job.issueSummaries)) {
+    throw new Error("Job state issueSummaries must be an array.");
+  }
+  for (const summary of job.issueSummaries) {
+    assertRecord(summary, "Each issue summary must be an object.");
+    assertString(summary.issueRef, "Each issue summary must include issueRef.");
+    assertEnum(summary.status, ["not_started", "in_progress", "blocked", "completed"], "Issue summary status is invalid.");
+    assertStringArray(summary.workItemIds, "Each issue summary workItemIds value must be an array of strings.");
+    assertStringArray(summary.completedWorkItemIds, "Each issue summary completedWorkItemIds value must be an array of strings.");
+    assertStringArray(summary.pendingWorkItemIds, "Each issue summary pendingWorkItemIds value must be an array of strings.");
+    assertStringArray(summary.failedWorkItemIds, "Each issue summary failedWorkItemIds value must be an array of strings.");
+    assertStringArray(summary.branchNames, "Each issue summary branchNames value must be an array of strings.");
+    assertStringArray(summary.remoteBranches, "Each issue summary remoteBranches value must be an array of strings.");
+    if (summary.latestResponse !== undefined) {
+      assertString(summary.latestResponse, "Each issue summary latestResponse must be a non-empty string when present.");
+    }
+    assertString(summary.updatedAt, "Each issue summary updatedAt must be a non-empty string.");
+  }
   assertString(job.createdAt, "Job state createdAt must be a non-empty string.");
   assertString(job.updatedAt, "Job state updatedAt must be a non-empty string.");
 

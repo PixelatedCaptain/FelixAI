@@ -1,4 +1,5 @@
 import { runCommand } from "./process-utils.js";
+import type { PushStatus } from "./types.js";
 
 export async function assertGitRepository(repoPath: string): Promise<void> {
   try {
@@ -70,4 +71,91 @@ export async function listChangedFiles(repoPath: string, baseBranch: string, bra
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+}
+
+export async function getPreferredRemote(repoPath: string): Promise<string | undefined> {
+  const result = await runCommand("git", ["-C", repoPath, "remote"]);
+  if (!result.stdout) {
+    return undefined;
+  }
+
+  const remotes = result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (remotes.includes("origin")) {
+    return "origin";
+  }
+
+  return remotes[0];
+}
+
+export async function getRemoteUrl(repoPath: string, remoteName: string): Promise<string | undefined> {
+  try {
+    const result = await runCommand("git", ["-C", repoPath, "remote", "get-url", remoteName]);
+    return result.stdout || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function getBranchPushStatus(
+  repoPath: string,
+  branchName: string,
+  remoteName?: string
+): Promise<{ remoteBranchName?: string; existsRemotely: boolean; pushStatus: PushStatus; aheadBy: number; behindBy: number }> {
+  if (!remoteName) {
+    return {
+      existsRemotely: false,
+      pushStatus: "no-remote",
+      aheadBy: 0,
+      behindBy: 0
+    };
+  }
+
+  const remoteBranchName = `${remoteName}/${branchName}`;
+  try {
+    await runCommand("git", ["-C", repoPath, "rev-parse", "--verify", "--quiet", `refs/remotes/${remoteBranchName}`]);
+  } catch {
+    return {
+      remoteBranchName,
+      existsRemotely: false,
+      pushStatus: "branch-not-pushed",
+      aheadBy: 0,
+      behindBy: 0
+    };
+  }
+
+  try {
+    const result = await runCommand("git", ["-C", repoPath, "rev-list", "--left-right", "--count", `${branchName}...${remoteBranchName}`]);
+    const [aheadRaw, behindRaw] = result.stdout.split(/\s+/);
+    const aheadBy = Number.parseInt(aheadRaw ?? "0", 10);
+    const behindBy = Number.parseInt(behindRaw ?? "0", 10);
+    let pushStatus: PushStatus = "unknown";
+    if (aheadBy === 0 && behindBy === 0) {
+      pushStatus = "up-to-date";
+    } else if (aheadBy > 0 && behindBy === 0) {
+      pushStatus = "ahead-of-remote";
+    } else if (aheadBy === 0 && behindBy > 0) {
+      pushStatus = "behind-remote";
+    } else if (aheadBy > 0 && behindBy > 0) {
+      pushStatus = "diverged";
+    }
+
+    return {
+      remoteBranchName,
+      existsRemotely: true,
+      pushStatus,
+      aheadBy: Number.isNaN(aheadBy) ? 0 : aheadBy,
+      behindBy: Number.isNaN(behindBy) ? 0 : behindBy
+    };
+  } catch {
+    return {
+      remoteBranchName,
+      existsRemotely: true,
+      pushStatus: "unknown",
+      aheadBy: 0,
+      behindBy: 0
+    };
+  }
 }

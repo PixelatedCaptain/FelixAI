@@ -209,6 +209,23 @@ async function main(): Promise<void> {
               );
             }
           }
+          if (job.remoteBranches.length > 0) {
+            console.log("[felixai] remote branches:");
+            for (const branch of job.remoteBranches) {
+              const remoteName = branch.remoteBranchName ?? branch.remoteName ?? "local-only";
+              console.log(
+                `[felixai] remote ${branch.workItemId}: ${remoteName} status=${branch.pushStatus} ahead=${branch.aheadBy} behind=${branch.behindBy}`
+              );
+            }
+          }
+          if (job.issueSummaries.length > 0) {
+            console.log("[felixai] issue summaries:");
+            for (const summary of job.issueSummaries) {
+              console.log(
+                `[felixai] issue ${summary.issueRef}: ${summary.status} items=${summary.workItemIds.join(",")} branches=${summary.branchNames.join(",") || "none"}`
+              );
+            }
+          }
           for (const item of job.workItems) {
             const session = job.sessions.find((entry) => entry.workItemId === item.id);
             const details = [
