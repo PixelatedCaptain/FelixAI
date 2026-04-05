@@ -69,6 +69,8 @@ export function validateConfig(config: FelixConfig): FelixConfig {
     assertString(config.defaultBaseBranch, "FelixAI config defaultBaseBranch must be a non-empty string.");
   }
   assertEnum(config.credentialSource, ["chatgpt-session", "env-api-key"], "FelixAI config credentialSource is invalid.");
+  assertRecord(config.git, "FelixAI config must include a git object.");
+  assertBoolean(config.git.allowDirtyWorkingTree, "FelixAI git.allowDirtyWorkingTree must be a boolean.");
 
   assertRecord(config.codex, "FelixAI config must include a codex object.");
   assertEnum(config.codex.approvalPolicy, ["never", "on-request", "on-failure", "untrusted"], "FelixAI approvalPolicy is invalid.");

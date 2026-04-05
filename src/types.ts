@@ -15,6 +15,9 @@ export interface FelixConfig {
   logDir: string;
   defaultBaseBranch?: string;
   credentialSource: CredentialSource;
+  git: {
+    allowDirtyWorkingTree: boolean;
+  };
   codex: {
     approvalPolicy: ApprovalMode;
     sandboxMode: SandboxMode;
@@ -33,6 +36,7 @@ export interface JobStartRequest {
   baseBranch?: string;
   parallelism?: number;
   autoResume?: boolean;
+  requireClean?: boolean;
 }
 
 export interface PlannedWorkItem {

@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 
 import { loadConfig } from "./config.js";
-import { getCurrentBranch, resolveGitRoot } from "./git.js";
+import { assertGitRepository, baseBranchExists, getCurrentBranch, isWorkingTreeDirty, resolveGitRoot } from "./git.js";
 import { StateStore } from "./state-store.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { CodexAdapter } from "./codex-adapter.js";
@@ -30,7 +30,11 @@ export interface JobManagerDependencies {
   workspaceManager: Pick<WorkspaceManager, "ensureWorkspace">;
   store: StateStore;
   config: FelixConfig;
-  resolveRepoContext: (repoPath: string, requestedBaseBranch?: string) => Promise<{ repoRoot: string; baseBranch: string }>;
+  resolveRepoContext: (
+    repoPath: string,
+    requestedBaseBranch?: string,
+    options?: { requireClean?: boolean }
+  ) => Promise<{ repoRoot: string; baseBranch: string; dirtyWorkingTree: boolean }>;
 }
 
 function now(): string {
@@ -134,10 +138,21 @@ export async function createJobManager(projectRoot = process.cwd(), overrides?: 
     config,
     resolveRepoContext:
       overrides?.resolveRepoContext ??
-      (async (repoPath, requestedBaseBranch) => {
+      (async (repoPath, requestedBaseBranch, options) => {
+        await assertGitRepository(repoPath);
         const repoRoot = await resolveGitRoot(repoPath);
         const baseBranch = requestedBaseBranch ?? config.defaultBaseBranch ?? (await getCurrentBranch(repoRoot));
-        return { repoRoot, baseBranch };
+        if (!(await baseBranchExists(repoRoot, baseBranch))) {
+          throw new Error(`Base branch '${baseBranch}' does not exist in repository '${repoRoot}'.`);
+        }
+
+        const dirtyWorkingTree = await isWorkingTreeDirty(repoRoot);
+        const requireClean = options?.requireClean ?? !config.git.allowDirtyWorkingTree;
+        if (requireClean && dirtyWorkingTree) {
+          throw new Error(`Repository '${repoRoot}' has uncommitted changes. Commit or stash them, or disable the clean-tree requirement.`);
+        }
+
+        return { repoRoot, baseBranch, dirtyWorkingTree };
       })
   });
 }
@@ -146,7 +161,9 @@ export class JobManager {
   constructor(private readonly deps: JobManagerDependencies) {}
 
   async startJob(request: JobStartRequest): Promise<JobState> {
-    const { repoRoot, baseBranch } = await this.deps.resolveRepoContext(request.repoPath, request.baseBranch);
+    const { repoRoot, baseBranch, dirtyWorkingTree } = await this.deps.resolveRepoContext(request.repoPath, request.baseBranch, {
+      requireClean: request.requireClean
+    });
     const createdAt = now();
     let job: JobState = {
       schemaVersion: STATE_SCHEMA_VERSION,
@@ -172,6 +189,9 @@ export class JobManager {
     };
 
     job = addEvent(job, "info", "job", `Created job for repo ${repoRoot}`);
+    if (dirtyWorkingTree) {
+      job = addEvent(job, "warn", "job", "Repository has uncommitted changes; proceeding because dirty working trees are allowed.");
+    }
     await this.deps.store.saveJob(job);
 
     const plan = await this.deps.planner(request.task, repoRoot, baseBranch);

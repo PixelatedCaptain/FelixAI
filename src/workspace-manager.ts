@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { pathExists } from "./fs-utils.js";
+import { ensureDirectory, pathExists } from "./fs-utils.js";
 import { createWorktree } from "./git.js";
 import type { WorkspaceAssignment } from "./types.js";
 
@@ -19,6 +19,7 @@ export class WorkspaceManager {
   ): Promise<WorkspaceAssignment> {
     const branchName = `agent/${slugify(workItemId)}/job-${jobId.slice(0, 8)}`;
     const workspacePath = path.join(this.workspaceRoot, jobId, slugify(workItemId));
+    await ensureDirectory(path.dirname(workspacePath));
 
     if (!(await pathExists(workspacePath))) {
       await createWorktree(repoRoot, workspacePath, branchName, baseBranch);

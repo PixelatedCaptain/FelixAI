@@ -60,6 +60,7 @@ felixai config show
 felixai version
 felixai job start --repo . --task "Build the first milestone"
 felixai job start --repo . --task-file ./felixai.task.json
+felixai job start --repo . --task "Refactor auth" --require-clean
 felixai job status <job-id>
 felixai job list
 felixai job resume <job-id>
@@ -72,6 +73,13 @@ FelixAI persists:
 - job state under `.felixai/state/jobs`
 - per-job event logs under `.felixai/logs/jobs/*.events.jsonl`
 - per-job log summaries under `.felixai/logs/jobs/*.summary.json`
+
+## Repo policy
+
+FelixAI validates that the target path is a Git repository and that the selected base branch exists.
+
+- By default, dirty working trees are allowed.
+- Use `--require-clean` on `job start` to block execution when the repo has uncommitted changes.
 
 ## Repo Docs
 

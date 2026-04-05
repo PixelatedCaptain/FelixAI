@@ -16,7 +16,7 @@ Usage:
   felixai init [--force]
   felixai config show
   felixai version
-  felixai job start --repo <path> (--task "<large task>" | --task-file <file>) [--base-branch <branch>] [--parallel <n>] [--auto-resume]
+  felixai job start --repo <path> (--task "<large task>" | --task-file <file>) [--base-branch <branch>] [--parallel <n>] [--auto-resume] [--require-clean]
   felixai job status <job-id>
   felixai job resume <job-id>
   felixai job list
@@ -26,6 +26,7 @@ Examples:
   felixai config show
   felixai job start --repo . --task "Build the next milestone"
   felixai job start --repo . --task-file ./felixai.task.json --parallel 3 --auto-resume
+  felixai job start --repo . --task "Refactor auth" --require-clean
 `);
 }
 
@@ -122,12 +123,14 @@ async function main(): Promise<void> {
           const baseBranch = getFlagValue(jobArgs, "--base-branch");
           const parallelism = parseInteger(getFlagValue(jobArgs, "--parallel"));
           const autoResume = hasFlag(jobArgs, "--auto-resume");
+          const requireClean = hasFlag(jobArgs, "--require-clean");
           const job = await manager.startJob({
             repoPath,
             task,
             baseBranch,
             parallelism,
-            autoResume
+            autoResume,
+            requireClean
           });
           console.log(`[felixai] job ${job.jobId} status: ${job.status}`);
           console.log(`[felixai] planner summary: ${job.planningSummary ?? "n/a"}`);

@@ -10,6 +10,9 @@ export const DEFAULT_CONFIG: FelixConfig = {
   workspaceRoot: ".felixai/workspaces",
   logDir: ".felixai/logs",
   credentialSource: "chatgpt-session",
+  git: {
+    allowDirtyWorkingTree: true
+  },
   codex: {
     approvalPolicy: "never",
     sandboxMode: "workspace-write",

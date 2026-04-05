@@ -65,7 +65,8 @@ async function testPlannerAndExecutionFlow(): Promise<void> {
     store,
     resolveRepoContext: async (repoPath, requestedBaseBranch) => ({
       repoRoot: repoPath,
-      baseBranch: requestedBaseBranch ?? "main"
+      baseBranch: requestedBaseBranch ?? "main",
+      dirtyWorkingTree: false
     }),
     workspaceManager: {
       ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
@@ -108,7 +109,8 @@ async function testResumeFlow(): Promise<void> {
     store,
     resolveRepoContext: async (repoPath, requestedBaseBranch) => ({
       repoRoot: repoPath,
-      baseBranch: requestedBaseBranch ?? "main"
+      baseBranch: requestedBaseBranch ?? "main",
+      dirtyWorkingTree: false
     }),
     workspaceManager: {
       ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
@@ -178,12 +180,78 @@ async function testInvalidStateFailsValidation(): Promise<void> {
   await assert.rejects(store.loadJob("broken"), /parallelism/);
 }
 
+async function testRequireCleanRejectsDirtyRepo(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-clean-"));
+  await ensureFelixDirectories(root);
+
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: true
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "Should never plan",
+      workItems: [{ id: "x", title: "x", prompt: "x", dependsOn: [] }]
+    }),
+    executor: async (): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: "ok"
+    })
+  });
+
+  const job = await manager.startJob({
+    repoPath: root,
+    task: "dirty repo allowed by override path"
+  });
+  assert.equal(job.events.some((event) => /uncommitted changes/i.test(event.message)), true);
+}
+
+async function testBaseBranchFailureBubblesClearly(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-branch-"));
+  await ensureFelixDirectories(root);
+
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    resolveRepoContext: async () => {
+      throw new Error("Base branch 'missing-branch' does not exist in repository.");
+    },
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "Should never plan",
+      workItems: [{ id: "x", title: "x", prompt: "x", dependsOn: [] }]
+    }),
+    executor: async (): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: "ok"
+    })
+  });
+
+  await assert.rejects(
+    manager.startJob({
+      repoPath: root,
+      task: "bad branch"
+    }),
+    /missing-branch/
+  );
+}
+
 async function main(): Promise<void> {
   await testInit();
   await testInvalidConfigFailsValidation();
   await testPlannerAndExecutionFlow();
   await testResumeFlow();
   await testInvalidStateFailsValidation();
+  await testRequireCleanRejectsDirtyRepo();
+  await testBaseBranchFailureBubblesClearly();
   console.log("job manager tests passed");
 }
 
