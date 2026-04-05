@@ -4,11 +4,20 @@ export const STATE_SCHEMA_VERSION = 1;
 
 export type CredentialSource = "chatgpt-session" | "env-api-key";
 export type JobStatus = "planning" | "ready" | "running" | "paused" | "completed" | "failed";
-export type WorkItemStatus = "pending" | "running" | "boundary" | "completed" | "failed";
-export type SessionStatus = "pending" | "running" | "boundary" | "completed" | "failed";
+export type WorkItemStatus = "pending" | "running" | "boundary" | "blocked" | "completed" | "failed";
+export type SessionStatus = "pending" | "running" | "boundary" | "blocked" | "completed" | "failed";
 export type EventLevel = "info" | "warn" | "error";
 export type PushStatus = "no-remote" | "branch-not-pushed" | "up-to-date" | "ahead-of-remote" | "behind-remote" | "diverged" | "unknown";
 export type IssueRunStatus = "not_started" | "in_progress" | "blocked" | "completed";
+export type FailureCategory =
+  | "workspace-conflict"
+  | "workspace-missing"
+  | "workspace-setup"
+  | "git"
+  | "execution-boundary"
+  | "execution-blocked"
+  | "execution-error"
+  | "unknown";
 
 export interface FelixConfig {
   schemaVersion: number;
@@ -63,6 +72,9 @@ export interface WorkItemState extends PlannedWorkItem {
   sessionId?: string;
   lastResponse?: string;
   error?: string;
+  failureCategory?: FailureCategory;
+  retryable?: boolean;
+  manualReviewRequired?: boolean;
   startedAt?: string;
   completedAt?: string;
 }
@@ -78,6 +90,9 @@ export interface SessionState {
   lastResponse?: string;
   updatedAt: string;
   error?: string;
+  failureCategory?: FailureCategory;
+  retryable?: boolean;
+  manualReviewRequired?: boolean;
 }
 
 export interface JobEvent {
@@ -155,6 +170,8 @@ export interface JobState {
 export interface WorkspaceAssignment {
   branchName: string;
   workspacePath: string;
+  mode?: "created" | "reused" | "reattached";
+  cleanupPerformed?: boolean;
 }
 
 export interface ExecutionResult {

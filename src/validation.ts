@@ -198,18 +198,44 @@ export function validateJobState(job: JobState): JobState {
     assertString(item.id, "Each work item must include id.");
     assertString(item.title, "Each work item must include title.");
     assertString(item.prompt, "Each work item must include prompt.");
-    assertEnum(item.status, ["pending", "running", "boundary", "completed", "failed"], `Work item '${item.id}' has an invalid status.`);
+    assertEnum(item.status, ["pending", "running", "boundary", "blocked", "completed", "failed"], `Work item '${item.id}' has an invalid status.`);
     assertNonNegativeInteger(item.attempts, `Work item '${item.id}' attempts must be zero or greater.`);
     assertStringArray(item.dependsOn, `Work item '${item.id}' dependsOn must be an array of strings.`);
     assertOptionalStringArray(item.issueRefs, `Work item '${item.id}' issueRefs must be an array of strings when present.`);
+    if (item.failureCategory !== undefined) {
+      assertEnum(
+        item.failureCategory,
+        ["workspace-conflict", "workspace-missing", "workspace-setup", "git", "execution-boundary", "execution-blocked", "execution-error", "unknown"],
+        `Work item '${item.id}' failureCategory is invalid.`
+      );
+    }
+    if (item.retryable !== undefined) {
+      assertBoolean(item.retryable, `Work item '${item.id}' retryable must be a boolean when present.`);
+    }
+    if (item.manualReviewRequired !== undefined) {
+      assertBoolean(item.manualReviewRequired, `Work item '${item.id}' manualReviewRequired must be a boolean when present.`);
+    }
   }
 
   for (const session of job.sessions) {
     assertRecord(session, "Each session must be an object.");
     assertString(session.workItemId, "Each session must include workItemId.");
-    assertEnum(session.status, ["pending", "running", "boundary", "completed", "failed"], `Session '${session.workItemId}' has an invalid status.`);
+    assertEnum(session.status, ["pending", "running", "boundary", "blocked", "completed", "failed"], `Session '${session.workItemId}' has an invalid status.`);
     assertPositiveInteger(session.attemptCount, `Session '${session.workItemId}' attemptCount must be a positive integer.`);
     assertString(session.updatedAt, `Session '${session.workItemId}' updatedAt must be a non-empty string.`);
+    if (session.failureCategory !== undefined) {
+      assertEnum(
+        session.failureCategory,
+        ["workspace-conflict", "workspace-missing", "workspace-setup", "git", "execution-boundary", "execution-blocked", "execution-error", "unknown"],
+        `Session '${session.workItemId}' failureCategory is invalid.`
+      );
+    }
+    if (session.retryable !== undefined) {
+      assertBoolean(session.retryable, `Session '${session.workItemId}' retryable must be a boolean when present.`);
+    }
+    if (session.manualReviewRequired !== undefined) {
+      assertBoolean(session.manualReviewRequired, `Session '${session.workItemId}' manualReviewRequired must be a boolean when present.`);
+    }
   }
 
   for (const event of job.events) {

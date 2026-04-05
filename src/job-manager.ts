@@ -18,6 +18,7 @@ import { WorkspaceManager } from "./workspace-manager.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import {
   type BranchReadiness,
+  type FailureCategory,
   STATE_SCHEMA_VERSION,
   type ExecutionResult,
   type FelixConfig,
@@ -96,7 +97,7 @@ function deriveJobStatus(job: JobState): JobState["status"] {
     return "completed";
   }
 
-  if (job.workItems.some((item) => item.status === "boundary")) {
+  if (job.workItems.some((item) => item.status === "boundary" || item.status === "blocked")) {
     return "paused";
   }
 
@@ -113,7 +114,7 @@ function eligibleItems(job: JobState, includeBoundary: boolean): WorkItemState[]
       return false;
     }
 
-    if (item.status === "boundary" && !includeBoundary) {
+    if ((item.status === "boundary" || item.status === "blocked") && !includeBoundary) {
       return false;
     }
 
@@ -146,7 +147,7 @@ function recalculateMergeReadiness(workItems: WorkItemState[]): JobState["mergeR
 }
 
 function deriveIssueRunStatus(items: WorkItemState[]): IssueRunSummary["status"] {
-  if (items.some((item) => item.status === "failed" || item.status === "boundary")) {
+  if (items.some((item) => item.status === "failed" || item.status === "boundary" || item.status === "blocked")) {
     return "blocked";
   }
   if (items.every((item) => item.status === "completed")) {
@@ -181,7 +182,7 @@ function buildIssueSummaries(job: JobState): IssueRunSummary[] {
         workItemIds: items.map((item) => item.id),
         completedWorkItemIds: items.filter((item) => item.status === "completed").map((item) => item.id),
         pendingWorkItemIds: items.filter((item) => item.status === "pending" || item.status === "running").map((item) => item.id),
-        failedWorkItemIds: items.filter((item) => item.status === "failed" || item.status === "boundary").map((item) => item.id),
+        failedWorkItemIds: items.filter((item) => item.status === "failed" || item.status === "boundary" || item.status === "blocked").map((item) => item.id),
         branchNames: items.map((item) => item.branchName).filter((value): value is string => Boolean(value)),
         remoteBranches: remoteBranches.map((branch) => branch.remoteBranchName ?? `${branch.remoteName ?? "local"}/${branch.branchName}`),
         latestResponse: latestItem[0]?.lastResponse,
@@ -199,6 +200,24 @@ function updateWorkItem(job: JobState, workItem: WorkItemState): JobState {
     workItems,
     mergeReadiness: recalculateMergeReadiness(workItems)
   };
+}
+
+function classifyFailure(message: string): {
+  category: FailureCategory;
+  retryable: boolean;
+  manualReviewRequired: boolean;
+} {
+  const normalized = message.toLowerCase();
+  if (normalized.includes("workspace conflict")) {
+    return { category: "workspace-conflict", retryable: false, manualReviewRequired: true };
+  }
+  if (normalized.includes("worktree") || normalized.includes("branch") || normalized.includes("git")) {
+    return { category: "git", retryable: true, manualReviewRequired: true };
+  }
+  if (normalized.includes("workspace")) {
+    return { category: "workspace-setup", retryable: true, manualReviewRequired: true };
+  }
+  return { category: "execution-error", retryable: true, manualReviewRequired: true };
 }
 
 export async function createJobManager(projectRoot = process.cwd(), overrides?: Partial<JobManagerDependencies>): Promise<JobManager> {
@@ -508,23 +527,63 @@ export class JobManager {
       throw new Error(`Unknown work item '${workItemId}'.`);
     }
 
-    const workspace = await this.deps.workspaceManager.ensureWorkspace(
-      job.jobId,
-      item.id,
-      job.baseBranch,
-      job.repoRoot,
-      item.issueRefs ?? []
-    );
+    let workspace;
+    try {
+      workspace = await this.deps.workspaceManager.ensureWorkspace(
+        job.jobId,
+        item.id,
+        job.baseBranch,
+        job.repoRoot,
+        item.issueRefs ?? []
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failure = classifyFailure(message);
+      const failedItem: WorkItemState = {
+        ...item,
+        status: "failed",
+        error: message,
+        failureCategory: failure.category,
+        retryable: failure.retryable,
+        manualReviewRequired: failure.manualReviewRequired
+      };
+      job = await this.deps.store.loadJob(jobId);
+      job = updateWorkItem(job, failedItem);
+      job = await this.refreshDerivedState(job);
+      job = addEvent(job, "error", "workspace", `Workspace setup failed [${failure.category}]: ${message}`, item.id);
+      job = updateSession(job, {
+        workItemId: item.id,
+        status: "failed",
+        attemptCount: item.attempts + 1,
+        updatedAt: now(),
+        error: message,
+        failureCategory: failure.category,
+        retryable: failure.retryable,
+        manualReviewRequired: failure.manualReviewRequired
+      });
+      job.status = deriveJobStatus(job);
+      await this.deps.store.saveJob(job);
+      return job;
+    }
     let updatedItem: WorkItemState = {
       ...item,
       workspacePath: workspace.workspacePath,
       branchName: workspace.branchName,
       status: "running",
       attempts: item.attempts + 1,
+      failureCategory: undefined,
+      retryable: undefined,
+      manualReviewRequired: undefined,
       startedAt: item.startedAt ?? now()
     };
     job = updateWorkItem(job, updatedItem);
-    job = addEvent(job, "info", "workspace", `Prepared ${workspace.workspacePath} on ${workspace.branchName}`, item.id);
+    job = addEvent(
+      job,
+      "info",
+      "workspace",
+      `Prepared ${workspace.workspacePath} on ${workspace.branchName}${workspace.mode ? ` (${workspace.mode})` : ""}`,
+      item.id
+    );
     job = updateSession(job, {
       workItemId: item.id,
       sessionId: item.sessionId,
@@ -561,6 +620,9 @@ export class JobManager {
         if (result.status === "completed") {
           updatedItem.status = "completed";
           updatedItem.completedAt = now();
+          updatedItem.failureCategory = undefined;
+          updatedItem.retryable = undefined;
+          updatedItem.manualReviewRequired = undefined;
           job = updateWorkItem(job, updatedItem);
           job = await this.refreshDerivedState(job);
           job = addEvent(job, "info", "session", `Completed work item '${item.title}'.`, item.id);
@@ -583,6 +645,9 @@ export class JobManager {
         if (result.status === "needs_resume" && job.autoResume && updatedItem.attempts <= job.maxResumesPerItem) {
           resumePrompt = result.nextPrompt ?? "Continue the current work item from the current repo state.";
           updatedItem.attempts += 1;
+          updatedItem.failureCategory = "execution-boundary";
+          updatedItem.retryable = true;
+          updatedItem.manualReviewRequired = false;
           job = updateWorkItem(job, updatedItem);
           job = await this.refreshDerivedState(job);
           job = addEvent(job, "info", "session", "Boundary reached; auto-resuming work item.", item.id);
@@ -601,7 +666,39 @@ export class JobManager {
           continue;
         }
 
+        if (result.status === "blocked") {
+          updatedItem.status = "blocked";
+          updatedItem.error = result.summary;
+          updatedItem.failureCategory = "execution-blocked";
+          updatedItem.retryable = true;
+          updatedItem.manualReviewRequired = true;
+          job = updateWorkItem(job, updatedItem);
+          job = await this.refreshDerivedState(job);
+          job = addEvent(job, "warn", "session", "Execution blocked; manual review required before retry.", item.id);
+          job = updateSession(job, {
+            workItemId: item.id,
+            sessionId,
+            status: "blocked",
+            workspacePath: workspace.workspacePath,
+            branchName: workspace.branchName,
+            attemptCount: updatedItem.attempts,
+            lastPrompt: resumePrompt ?? item.prompt,
+            lastResponse: result.summary,
+            updatedAt: now(),
+            error: result.summary,
+            failureCategory: "execution-blocked",
+            retryable: true,
+            manualReviewRequired: true
+          });
+          job.status = deriveJobStatus(job);
+          await this.deps.store.saveJob(job);
+          return job;
+        }
+
         updatedItem.status = "boundary";
+        updatedItem.failureCategory = "execution-boundary";
+        updatedItem.retryable = true;
+        updatedItem.manualReviewRequired = true;
         job = updateWorkItem(job, updatedItem);
         job = await this.refreshDerivedState(job);
         job = addEvent(job, "warn", "session", "Boundary reached; waiting for manual resume.", item.id);
@@ -614,20 +711,27 @@ export class JobManager {
           attemptCount: updatedItem.attempts,
           lastPrompt: resumePrompt ?? item.prompt,
           lastResponse: result.summary,
-          updatedAt: now()
+          updatedAt: now(),
+          failureCategory: "execution-boundary",
+          retryable: true,
+          manualReviewRequired: true
         });
         job.status = deriveJobStatus(job);
         await this.deps.store.saveJob(job);
         return job;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        const failure = classifyFailure(message);
         updatedItem.status = "failed";
         updatedItem.error = message;
         updatedItem.sessionId = sessionId;
+        updatedItem.failureCategory = failure.category;
+        updatedItem.retryable = failure.retryable;
+        updatedItem.manualReviewRequired = failure.manualReviewRequired;
         job = await this.deps.store.loadJob(jobId);
         job = updateWorkItem(job, updatedItem);
         job = await this.refreshDerivedState(job);
-        job = addEvent(job, "error", "session", `Work item failed: ${message}`, item.id);
+        job = addEvent(job, "error", "session", `Work item failed [${failure.category}]: ${message}`, item.id);
         job = updateSession(job, {
           workItemId: item.id,
           sessionId,
@@ -638,7 +742,10 @@ export class JobManager {
           lastPrompt: resumePrompt ?? item.prompt,
           lastResponse: updatedItem.lastResponse,
           updatedAt: now(),
-          error: message
+          error: message,
+          failureCategory: failure.category,
+          retryable: failure.retryable,
+          manualReviewRequired: failure.manualReviewRequired
         });
         job.status = deriveJobStatus(job);
         await this.deps.store.saveJob(job);

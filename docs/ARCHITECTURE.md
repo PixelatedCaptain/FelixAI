@@ -30,6 +30,7 @@ Encapsulates Codex SDK usage for:
 ### Workspace manager
 
 Creates one isolated Git worktree per work item and assigns a short-lived branch.
+It should prune stale registrations, reuse matching worktrees when safe, and classify conflicting workspace paths as operator-visible failures.
 
 ### State store
 
@@ -38,6 +39,7 @@ Persists config, jobs, work items, sessions, and event history as JSON on disk.
 ### Resume controller
 
 Decides whether a boundary result should be auto-resumed or paused for manual review.
+Explicit `blocked` results are treated separately from resumable boundaries and require human intervention.
 
 ## State model
 

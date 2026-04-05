@@ -1,6 +1,12 @@
 import { runCommand } from "./process-utils.js";
 import type { PushStatus } from "./types.js";
 
+export interface WorktreeEntry {
+  path: string;
+  branch?: string;
+  bare: boolean;
+}
+
 export async function assertGitRepository(repoPath: string): Promise<void> {
   try {
     await runCommand("git", ["-C", repoPath, "rev-parse", "--is-inside-work-tree"]);
@@ -59,6 +65,46 @@ export async function createWorktree(repoPath: string, workspacePath: string, br
   }
 
   await runCommand("git", ["-C", repoPath, "worktree", "add", "-b", branchName, workspacePath, baseBranch]);
+}
+
+export async function pruneWorktrees(repoPath: string): Promise<void> {
+  await runCommand("git", ["-C", repoPath, "worktree", "prune"]);
+}
+
+export async function listWorktrees(repoPath: string): Promise<WorktreeEntry[]> {
+  const result = await runCommand("git", ["-C", repoPath, "worktree", "list", "--porcelain"]);
+  if (!result.stdout) {
+    return [];
+  }
+
+  const entries: WorktreeEntry[] = [];
+  let current: WorktreeEntry | undefined;
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (line.startsWith("worktree ")) {
+      if (current) {
+        entries.push(current);
+      }
+      current = {
+        path: line.slice("worktree ".length).trim(),
+        bare: false
+      };
+      continue;
+    }
+    if (!current) {
+      continue;
+    }
+    if (line.startsWith("branch ")) {
+      current.branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+      continue;
+    }
+    if (line.trim() === "bare") {
+      current.bare = true;
+    }
+  }
+  if (current) {
+    entries.push(current);
+  }
+  return entries;
 }
 
 export async function listChangedFiles(repoPath: string, baseBranch: string, branchName: string): Promise<string[]> {

@@ -10,6 +10,7 @@ FelixAI Orchestrator is a local CLI-driven orchestration engine for large softwa
 - Launches Codex sessions against those isolated workspaces
 - Persists job, session, and event state under `.felixai/state`
 - Supports boundary-aware manual resume and optional auto-resume
+- Distinguishes resume boundaries from blocked/manual-review execution results
 - Exposes local operational commands for start, resume, status, and listing jobs
 
 ## What It Does Not Do
@@ -80,6 +81,7 @@ FelixAI persists:
 
 `job status` also surfaces merge-readiness hints for completed branches, including likely overlaps in changed files.
 It also persists per-branch remote push status and issue-linked run summaries for later relay/dashboard use.
+Workspace setup and execution failures are classified and persisted so operators can see whether a condition is retryable or needs manual review.
 
 ## Repo policy
 
@@ -100,10 +102,17 @@ FelixAI validates that the target path is a Git repository and that the selected
 - Remote metadata is derived from local Git refs, so it works without requiring a live GitHub API call during job inspection.
 - FelixAI also derives per-issue run summaries that aggregate work items, branches, and latest work-item responses for relay-side display later.
 
+## Workspace lifecycle
+
+- FelixAI prunes stale worktree registrations before preparing a workspace.
+- If a matching worktree already exists, FelixAI reuses or reattaches it instead of blindly creating a duplicate.
+- If the target workspace path already exists with conflicting contents, FelixAI classifies that as a workspace conflict and persists the failure details.
+
 ## Repo Docs
 
 - [App plan](./docs/APP_PLAN.md)
 - [Architecture](./docs/ARCHITECTURE.md)
+- [Release plan](./docs/RELEASE_PLAN.md)
 
 ## Current MVP Shape
 

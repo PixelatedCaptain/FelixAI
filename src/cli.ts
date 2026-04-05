@@ -83,6 +83,7 @@ function summarizeJob(job: JobState): {
   pending: number;
   running: number;
   boundary: number;
+  blocked: number;
   completed: number;
   failed: number;
 } {
@@ -95,6 +96,7 @@ function summarizeJob(job: JobState): {
       pending: 0,
       running: 0,
       boundary: 0,
+      blocked: 0,
       completed: 0,
       failed: 0
     }
@@ -196,7 +198,7 @@ async function main(): Promise<void> {
           }
           console.log(`[felixai] planning summary: ${job.planningSummary ?? "n/a"}`);
           console.log(
-            `[felixai] work items: pending=${summary.pending} running=${summary.running} boundary=${summary.boundary} completed=${summary.completed} failed=${summary.failed}`
+            `[felixai] work items: pending=${summary.pending} running=${summary.running} boundary=${summary.boundary} blocked=${summary.blocked} completed=${summary.completed} failed=${summary.failed}`
           );
           if (job.mergeReadiness.branchReadiness.length > 0) {
             console.log(
@@ -234,7 +236,8 @@ async function main(): Promise<void> {
               `attempts=${item.attempts}`
             ].join(" ");
             const issueInfo = item.issueRefs && item.issueRefs.length > 0 ? ` issues=${item.issueRefs.join(",")}` : "";
-            console.log(`[felixai] ${item.id}: ${item.status} ${details}${issueInfo}`);
+            const failureInfo = item.failureCategory ? ` failure=${item.failureCategory} retryable=${item.retryable ? "yes" : "no"}` : "";
+            console.log(`[felixai] ${item.id}: ${item.status} ${details}${issueInfo}${failureInfo}`);
           }
           const recentEvents = job.events.slice(-5);
           if (recentEvents.length > 0) {

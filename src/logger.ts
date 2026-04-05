@@ -51,7 +51,10 @@ export class JobLogger {
         status: item.status,
         branchName: item.branchName ?? null,
         sessionId: item.sessionId ?? null,
-        issueRefs: item.issueRefs ?? []
+        issueRefs: item.issueRefs ?? [],
+        failureCategory: item.failureCategory ?? null,
+        retryable: item.retryable ?? null,
+        manualReviewRequired: item.manualReviewRequired ?? null
       }))
     });
   }

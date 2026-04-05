@@ -8,6 +8,7 @@ import { pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
 import { initializeProject } from "./init.js";
 import { JobManager } from "./job-manager.js";
 import { StateStore } from "./state-store.js";
+import { WorkspaceManager } from "./workspace-manager.js";
 import type { ExecutionResult, FelixConfig, JobState, PlanResult, WorkspaceAssignment } from "./types.js";
 
 async function createFakeWorkspace(root: string, jobId: string, workItemId: string): Promise<WorkspaceAssignment> {
@@ -590,6 +591,150 @@ async function testRemoteBranchMetadataAndIssueSummariesPersist(): Promise<void>
   assert.equal(saved.issueSummaries.length, 2);
 }
 
+async function testWorkspaceManagerReusesAndReattachesExistingWorktrees(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-worktree-"));
+  const repoRoot = path.join(root, "repo");
+  const worktreeState = new Map<string, string>();
+  const existingPaths = new Set<string>();
+  const managerA = new WorkspaceManager(path.join(root, ".felixai", "workspaces-a"), {
+    pathExists: async (target) => existingPaths.has(path.resolve(target)),
+    pruneWorktrees: async () => {},
+    listWorktrees: async () =>
+      [...worktreeState.entries()].map(([branch, worktreePath]) => ({
+        path: worktreePath,
+        branch,
+        bare: false
+      })),
+    createWorktree: async (_repo, workspacePath, branchName) => {
+      existingPaths.add(path.resolve(workspacePath));
+      worktreeState.set(branchName, workspacePath);
+    }
+  });
+  const managerB = new WorkspaceManager(path.join(root, ".felixai", "workspaces-b"), {
+    pathExists: async (target) => existingPaths.has(path.resolve(target)),
+    pruneWorktrees: async () => {},
+    listWorktrees: async () =>
+      [...worktreeState.entries()].map(([branch, worktreePath]) => ({
+        path: worktreePath,
+        branch,
+        bare: false
+      })),
+    createWorktree: async (_repo, workspacePath, branchName) => {
+      existingPaths.add(path.resolve(workspacePath));
+      worktreeState.set(branchName, workspacePath);
+    }
+  });
+
+  const first = await managerA.ensureWorkspace("12345678-job", "api", "main", repoRoot, ["142"]);
+  const second = await managerA.ensureWorkspace("12345678-job", "api", "main", repoRoot, ["142"]);
+  const third = await managerB.ensureWorkspace("12345678-job", "api", "main", repoRoot, ["142"]);
+
+  assert.equal(first.mode, "created");
+  assert.equal(second.mode, "reused");
+  assert.equal(second.workspacePath, first.workspacePath);
+  assert.equal(third.mode, "reattached");
+  assert.equal(third.workspacePath, first.workspacePath);
+
+  existingPaths.delete(path.resolve(first.workspacePath));
+  worktreeState.clear();
+  const recreated = await managerA.ensureWorkspace("12345678-job", "api", "main", repoRoot, ["142"]);
+  assert.equal(recreated.mode, "created");
+}
+
+async function testWorkspaceConflictIsClassifiedAndPersisted(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-workspace-conflict-"));
+  await ensureFelixDirectories(root);
+  const conflictPath = path.join(root, ".felixai", "workspaces", "conflict-job", "api");
+  await mkdir(conflictPath, { recursive: true });
+  await writeFile(path.join(conflictPath, "stale.txt"), "stale", "utf8");
+
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async () => {
+        throw new Error(`Workspace conflict: path '${conflictPath}' already exists.`);
+      }
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "workspace conflict",
+      workItems: [{ id: "api", title: "API", prompt: "API", dependsOn: [] }]
+    }),
+    executor: async (): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: "should not run"
+    })
+  });
+
+  const job = await manager.startJob({
+    repoPath: root,
+    task: "workspace conflict"
+  });
+
+  assert.equal(job.status, "failed");
+  assert.equal(job.workItems[0].status, "failed");
+  assert.equal(job.workItems[0].failureCategory, "workspace-conflict");
+  assert.equal(job.workItems[0].retryable, false);
+  assert.equal(job.events.some((event) => event.scope === "workspace" && /workspace-conflict/i.test(event.message)), true);
+}
+
+async function testBlockedExecutionIsPersistedForManualReview(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-blocked-"));
+  await ensureFelixDirectories(root);
+  let blockedOnce = true;
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "blocked",
+      workItems: [{ id: "review", title: "Review", prompt: "Review", dependsOn: [] }]
+    }),
+    executor: async (): Promise<ExecutionResult> => {
+      if (blockedOnce) {
+        blockedOnce = false;
+        return {
+          status: "blocked",
+          summary: "Human approval required"
+        };
+      }
+
+      return {
+        status: "completed",
+        summary: "Approved and completed"
+      };
+    }
+  });
+
+  const job = await manager.startJob({
+    repoPath: root,
+    task: "blocked"
+  });
+
+  assert.equal(job.status, "paused");
+  assert.equal(job.workItems[0].status, "blocked");
+  assert.equal(job.workItems[0].failureCategory, "execution-blocked");
+  assert.equal(job.workItems[0].retryable, true);
+  assert.equal(job.workItems[0].manualReviewRequired, true);
+  assert.equal(job.sessions[0]?.status, "blocked");
+
+  const resumed = await manager.resumeJob(job.jobId);
+  assert.equal(resumed.status, "completed");
+  assert.equal(resumed.workItems[0].status, "completed");
+}
+
 async function main(): Promise<void> {
   await testInit();
   await testInvalidConfigFailsValidation();
@@ -605,6 +750,9 @@ async function main(): Promise<void> {
   await testSchedulerStartsDependentWorkWithoutWaitingForWholeWave();
   await testIssueRefsPropagateToJobsAndBranches();
   await testRemoteBranchMetadataAndIssueSummariesPersist();
+  await testWorkspaceManagerReusesAndReattachesExistingWorktrees();
+  await testWorkspaceConflictIsClassifiedAndPersisted();
+  await testBlockedExecutionIsPersistedForManualReview();
   console.log("job manager tests passed");
 }
 

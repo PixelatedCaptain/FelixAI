@@ -83,16 +83,18 @@ const workItemStatusRank: Record<WorkItemState["status"], number> = {
   pending: 0,
   running: 1,
   boundary: 2,
-  completed: 3,
-  failed: 4
+  blocked: 3,
+  completed: 4,
+  failed: 5
 };
 
 const sessionStatusRank: Record<SessionState["status"], number> = {
   pending: 0,
   running: 1,
   boundary: 2,
-  completed: 3,
-  failed: 4
+  blocked: 3,
+  completed: 4,
+  failed: 5
 };
 
 function mergeWorkItems(current: WorkItemState[], incoming: WorkItemState[]): WorkItemState[] {
@@ -166,7 +168,7 @@ function deriveStatus(job: JobState): JobState["status"] {
   if (job.workItems.length > 0 && job.workItems.every((item) => item.status === "completed")) {
     return "completed";
   }
-  if (job.workItems.some((item) => item.status === "boundary")) {
+  if (job.workItems.some((item) => item.status === "boundary" || item.status === "blocked")) {
     return "paused";
   }
   if (job.workItems.some((item) => item.status === "running")) {
