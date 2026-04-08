@@ -8,6 +8,10 @@ function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "work-item";
 }
 
+function jobToken(jobId: string): string {
+  return jobId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "job";
+}
+
 interface WorkspaceManagerOps {
   pathExists: typeof pathExists;
   createWorktree: typeof createWorktree;
@@ -34,7 +38,7 @@ export class WorkspaceManager {
     issueRefs: string[] = []
   ): Promise<WorkspaceAssignment> {
     const issueToken = issueRefs[0] ? `issue-${slugify(issueRefs[0])}` : slugify(workItemId);
-    const branchName = `agent/${issueToken}/job-${jobId.slice(0, 8)}-${slugify(workItemId)}`;
+    const branchName = `agent/${issueToken}/job-${jobToken(jobId)}-${slugify(workItemId)}`;
     const workspacePath = path.join(this.workspaceRoot, jobId, slugify(workItemId));
     await ensureDirectory(path.dirname(workspacePath));
     await this.ops.pruneWorktrees(repoRoot);
