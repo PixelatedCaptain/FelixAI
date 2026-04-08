@@ -33,6 +33,10 @@ export async function getCurrentBranch(repoPath: string): Promise<string> {
   return result.stdout;
 }
 
+export async function checkoutBranch(repoPath: string, branchName: string): Promise<void> {
+  await runCommand("git", ["-C", repoPath, "checkout", branchName]);
+}
+
 export async function branchExists(repoPath: string, branchName: string): Promise<boolean> {
   try {
     await runCommand("git", ["-C", repoPath, "show-ref", "--verify", "--quiet", `refs/heads/${branchName}`]);
@@ -152,6 +156,52 @@ export async function pushBranch(repoPath: string, branchName: string, remoteNam
   await runCommand("git", ["-C", repoPath, "push", "--set-upstream", remoteName, branchName]);
 }
 
+async function remoteBranchExists(repoPath: string, remoteName: string, branchName: string): Promise<boolean> {
+  const result = await runCommand("git", ["-C", repoPath, "ls-remote", "--heads", remoteName, branchName]);
+  return result.stdout.length > 0;
+}
+
+async function refreshRemoteTrackingBranch(repoPath: string, remoteName: string, branchName: string): Promise<void> {
+  await runCommand("git", ["-C", repoPath, "fetch", remoteName, `refs/heads/${branchName}:refs/remotes/${remoteName}/${branchName}`]);
+}
+
+export async function commitAllChanges(repoPath: string, message: string): Promise<boolean> {
+  if (!(await isWorkingTreeDirty(repoPath))) {
+    return false;
+  }
+
+  await runCommand("git", ["-C", repoPath, "add", "-A"]);
+  await runCommand("git", ["-C", repoPath, "commit", "-m", message]);
+  return true;
+}
+
+export async function fileExistsInGitDir(repoPath: string, relativeGitPath: string): Promise<boolean> {
+  try {
+    await runCommand("git", ["-C", repoPath, "rev-parse", "--git-path", relativeGitPath]);
+    const resolved = await runCommand("git", ["-C", repoPath, "rev-parse", "--path-format=absolute", "--git-path", relativeGitPath]);
+    const targetPath = resolved.stdout;
+    const { access } = await import("node:fs/promises");
+    await access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function isMergeInProgress(repoPath: string): Promise<boolean> {
+  return fileExistsInGitDir(repoPath, "MERGE_HEAD");
+}
+
+export async function continueMerge(repoPath: string): Promise<void> {
+  await runCommand("git", ["-C", repoPath, "merge", "--continue"], {
+    env: {
+      ...process.env,
+      GIT_EDITOR: "true",
+      GIT_MERGE_AUTOEDIT: "no"
+    }
+  });
+}
+
 export async function createMergeWorktree(
   repoPath: string,
   workspacePath: string,
@@ -182,6 +232,18 @@ export async function listConflictedFiles(repoPath: string): Promise<string[]> {
     .filter((line) => line.length > 0);
 }
 
+export async function stageFiles(repoPath: string, files: string[]): Promise<void> {
+  if (files.length === 0) {
+    return;
+  }
+
+  await runCommand("git", ["-C", repoPath, "add", "--", ...files]);
+}
+
+export async function stageAllChanges(repoPath: string): Promise<void> {
+  await runCommand("git", ["-C", repoPath, "add", "-A"]);
+}
+
 export async function getBranchPushStatus(
   repoPath: string,
   branchName: string,
@@ -198,7 +260,18 @@ export async function getBranchPushStatus(
 
   const remoteBranchName = `${remoteName}/${branchName}`;
   try {
-    await runCommand("git", ["-C", repoPath, "rev-parse", "--verify", "--quiet", `refs/remotes/${remoteBranchName}`]);
+    const existsRemotely = await remoteBranchExists(repoPath, remoteName, branchName);
+    if (!existsRemotely) {
+      return {
+        remoteBranchName,
+        existsRemotely: false,
+        pushStatus: "branch-not-pushed",
+        aheadBy: 0,
+        behindBy: 0
+      };
+    }
+
+    await refreshRemoteTrackingBranch(repoPath, remoteName, branchName);
   } catch {
     return {
       remoteBranchName,

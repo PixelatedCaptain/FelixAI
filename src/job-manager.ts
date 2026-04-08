@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
+import { readFile } from "node:fs/promises";
 
 import { loadConfig } from "./config.js";
 import {
@@ -9,6 +10,7 @@ import {
   commitAllChanges,
   continueMerge,
   createMergeWorktree,
+  fileExistsInGitDir,
   getBranchPushStatus,
   getCurrentBranch,
   getPreferredRemote,
@@ -19,7 +21,8 @@ import {
   listChangedFiles,
   mergeBranchIntoCurrent,
   pushBranch,
-  resolveGitRoot
+  resolveGitRoot,
+  stageAllChanges
 } from "./git.js";
 import { StateStore } from "./state-store.js";
 import { WorkspaceManager } from "./workspace-manager.js";
@@ -104,6 +107,75 @@ function formatDurationFromMilliseconds(durationMs: number): string {
   }
   parts.push(`${seconds}s`);
   return parts.join(" ");
+}
+
+async function canAutoStageConflictFile(workspacePath: string, relativePath: string): Promise<boolean> {
+  try {
+    const contents = await readFile(path.join(workspacePath, relativePath), "utf8");
+    return !contents.includes("<<<<<<<") && !contents.includes("=======") && !contents.includes(">>>>>>>");
+  } catch {
+    return false;
+  }
+}
+
+async function settleMergeResolution(repoPath: string, workspacePath: string): Promise<{ remaining: string[]; mergeInProgress: boolean }> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const lockExists = await fileExistsInGitDir(repoPath, "index.lock");
+    if (lockExists) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      continue;
+    }
+
+    const unresolvedFiles = await listConflictedFiles(workspacePath).catch(() => []);
+    if (unresolvedFiles.length === 0) {
+      const mergeInProgress = await isMergeInProgress(workspacePath).catch(() => false);
+      if (!mergeInProgress) {
+        return { remaining: [], mergeInProgress: false };
+      }
+
+      try {
+        await continueMerge(workspacePath);
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        continue;
+      }
+
+      const mergeStillInProgress = await isMergeInProgress(workspacePath).catch(() => false);
+      if (!mergeStillInProgress) {
+        return { remaining: [], mergeInProgress: false };
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      continue;
+    }
+
+    let allConflictsResolved = true;
+    for (const file of unresolvedFiles) {
+      if (!(await canAutoStageConflictFile(workspacePath, file))) {
+        allConflictsResolved = false;
+        break;
+      }
+    }
+
+    if (!allConflictsResolved) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      continue;
+    }
+
+    try {
+      await stageAllChanges(repoPath);
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      continue;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  const remaining = await listConflictedFiles(workspacePath).catch(() => []);
+  const mergeInProgress = remaining.length === 0 ? await isMergeInProgress(workspacePath).catch(() => false) : true;
+  return { remaining, mergeInProgress };
 }
 
 function createJobId(): string {
@@ -902,15 +974,11 @@ export class JobManager {
       sessionId: options?.sessionId
     });
 
-    const remaining = await listConflictedFiles(current.workspacePath).catch(() => []);
-    const mergeInProgress = remaining.length === 0 ? await isMergeInProgress(current.workspacePath).catch(() => false) : true;
-
-    if (remaining.length === 0 && mergeInProgress) {
-      await continueMerge(current.workspacePath);
-    }
+    const settled = await settleMergeResolution(current.workspacePath, current.workspacePath);
+    const remaining = settled.remaining;
 
     const mergeStillInProgress = await isMergeInProgress(current.workspacePath).catch(() => false);
-    const resolved = remaining.length === 0 && !mergeStillInProgress && result.status === "completed";
+    const resolved = remaining.length === 0 && !mergeStillInProgress;
     return {
       ...current,
       resolutionSessionId: result.sessionId ?? current.resolutionSessionId,

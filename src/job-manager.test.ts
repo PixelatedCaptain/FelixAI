@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1658,10 +1658,12 @@ async function testRealMergeConflictResolutionKeepsConflictedWorkspaceUntilResol
       workItems: []
     }),
     executor: async ({ workspacePath }): Promise<ExecutionResult> => {
+      const readmePath = path.join(workspacePath, "README.md");
       const conflicted = await runCommand("git", ["-C", workspacePath, "diff", "--name-only", "--diff-filter=U"]);
       assert.match(conflicted.stdout, /README\.md/);
-      await writeFile(path.join(workspacePath, "README.md"), "# Test Repo\n\nResolved merge conflict\n", "utf8");
-      await runCommand("git", ["-C", workspacePath, "add", "README.md"]);
+      setTimeout(() => {
+        void writeFile(readmePath, "# Test Repo\n\nResolved merge conflict\n", "utf8");
+      }, 250);
       return {
         status: "completed",
         summary: "Resolved README conflict",
@@ -1737,7 +1739,17 @@ async function testRealMergeConflictResolutionKeepsConflictedWorkspaceUntilResol
   const conflictedFiles = await runCommand("git", ["-C", mergeWorkspace, "diff", "--name-only", "--diff-filter=U"]);
   assert.match(conflictedFiles.stdout, /README\.md/);
 
+  const lockPath = (
+    await runCommand("git", ["-C", mergeWorkspace, "rev-parse", "--path-format=absolute", "--git-path", "index.lock"])
+  ).stdout;
+  await writeFile(lockPath, "locked", "utf8");
+  const releaseLock = setTimeout(() => {
+    void unlink(lockPath).catch(() => undefined);
+  }, 1_500);
+
   const resolved = await manager.resolveJobMergeConflicts(jobId);
+  clearTimeout(releaseLock);
+  await unlink(lockPath).catch(() => undefined);
   assert.equal(resolved.mergeAutomation.status, "merged");
   assert.equal(resolved.mergeAutomation.conflicts.length, 0);
   assert.equal(resolved.mergeAutomation.resolutionSessionId, "session-resolve-real");
@@ -1748,6 +1760,136 @@ async function testRealMergeConflictResolutionKeepsConflictedWorkspaceUntilResol
   assert.equal(status.stdout, "");
   const log = await runCommand("git", ["-C", mergeWorkspace, "log", "--oneline", "-n", "1"]);
   assert.match(log.stdout, /Merge branch/);
+}
+
+async function testResolveMergeConflictsTreatsCleanGitStateAsResolvedEvenWhenExecutorReportsBoundary(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-real-merge-boundary-"));
+  const repo = path.join(root, "repo");
+  await mkdir(repo, { recursive: true });
+  await ensureFelixDirectories(root);
+
+  await runCommand("git", ["init", "--initial-branch=main"], { cwd: repo });
+  await runCommand("git", ["config", "user.email", "felix@example.com"], { cwd: repo });
+  await runCommand("git", ["config", "user.name", "Felix Test"], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# Test Repo\n\nBase line\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const branchA = "agent/a/job-real-boundary-a";
+  const branchB = "agent/b/job-real-boundary-b";
+
+  await runCommand("git", ["checkout", "-b", branchA], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# Test Repo\n\nConflict scenario A\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "scenario-a"], { cwd: repo });
+
+  await runCommand("git", ["checkout", "main"], { cwd: repo });
+  await runCommand("git", ["checkout", "-b", branchB], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# Test Repo\n\nConflict scenario B\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "scenario-b"], { cwd: repo });
+  await runCommand("git", ["checkout", "main"], { cwd: repo });
+
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store,
+    resolveRepoContext: async () => ({
+      repoRoot: repo,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "unused",
+      workItems: []
+    }),
+    executor: async ({ workspacePath }): Promise<ExecutionResult> => {
+      const conflicted = await runCommand("git", ["-C", workspacePath, "diff", "--name-only", "--diff-filter=U"]);
+      assert.match(conflicted.stdout, /README\.md/);
+      await writeFile(path.join(workspacePath, "README.md"), "# Test Repo\n\nResolved merge conflict\n", "utf8");
+      return {
+        status: "blocked",
+        summary: "Resolved file but could not stage inside sandbox",
+        sessionId: "session-resolve-boundary"
+      };
+    }
+  });
+
+  const timestamp = new Date().toISOString();
+  const jobId = "20260408-real-boundary";
+  await store.saveJob({
+    schemaVersion: 1,
+    jobId,
+    status: "completed",
+    repoPath: repo,
+    repoRoot: repo,
+    task: "real conflict resolution boundary",
+    issueRefs: [],
+    baseBranch: "main",
+    parallelism: 2,
+    autoResume: false,
+    maxResumesPerItem: 2,
+    planningSummary: "real conflict resolution boundary",
+    workItems: [
+      {
+        id: "A",
+        title: "Conflict branch A",
+        prompt: "unused",
+        issueRefs: [],
+        dependsOn: [],
+        status: "completed",
+        attempts: 1,
+        branchName: branchA,
+        completedAt: timestamp
+      },
+      {
+        id: "B",
+        title: "Conflict branch B",
+        prompt: "unused",
+        issueRefs: [],
+        dependsOn: [],
+        status: "completed",
+        attempts: 1,
+        branchName: branchB,
+        completedAt: timestamp
+      }
+    ],
+    sessions: [],
+    events: [],
+    mergeReadiness: {
+      completedBranches: [branchA, branchB],
+      pendingBranches: [],
+      branchReadiness: [],
+      generatedAt: timestamp
+    },
+    mergeAutomation: {
+      targetBranch: "main",
+      mergedBranches: [],
+      pendingBranches: [],
+      conflicts: [],
+      status: "pending"
+    },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: timestamp,
+    updatedAt: timestamp
+  });
+
+  const merged = await manager.mergeJobBranches(jobId);
+  assert.equal(merged.mergeAutomation.status, "conflicted");
+
+  const resolved = await manager.resolveJobMergeConflicts(jobId);
+  assert.equal(resolved.mergeAutomation.status, "merged");
+  assert.equal(resolved.mergeAutomation.conflicts.length, 0);
+  assert.equal(resolved.mergeAutomation.resolutionSessionId, "session-resolve-boundary");
+
+  const mergeWorkspace = resolved.mergeAutomation.workspacePath as string;
+  const status = await runCommand("git", ["-C", mergeWorkspace, "status", "--porcelain"]);
+  assert.equal(status.stdout, "");
 }
 
 async function testCliForcesProcessExitWhenHandlesRemainOpen(): Promise<void> {
