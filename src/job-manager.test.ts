@@ -209,6 +209,56 @@ async function testPlannerAndExecutionFlow(): Promise<void> {
   assert.ok(await pathExists(path.join(root, ".felixai", "logs", "jobs", `${job.jobId}.summary.json`)));
 }
 
+async function testStartJobLoadsRepoAgentsInstructionsAndPassesThemToPlannerAndExecutor(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-agents-"));
+  await ensureFelixDirectories(root);
+  await writeFile(path.join(root, "AGENTS.md"), "Use snake_case helpers and keep tests updated.\n", "utf8");
+
+  let plannerInstructions: string | undefined;
+  let executorInstructions: string | undefined;
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store,
+    resolveRepoContext: async (repoPath, requestedBaseBranch) => ({
+      repoRoot: repoPath,
+      baseBranch: requestedBaseBranch ?? "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (task): Promise<PlanResult> => {
+      plannerInstructions = task;
+      return {
+        summary: "Single item",
+        workItems: [{ id: "WI-1", title: "Apply change", prompt: "Do the work", dependsOn: [] }]
+      };
+    },
+    executor: async ({ prompt }): Promise<ExecutionResult> => {
+      executorInstructions = prompt;
+      return {
+        status: "completed",
+        summary: "done",
+        sessionId: "session-agents"
+      };
+    }
+  });
+
+  const job = await manager.startJob({
+    repoPath: root,
+    task: "Apply change"
+  });
+
+  assert.match(plannerInstructions ?? "", /Repository instructions file: .*AGENTS\.md/);
+  assert.match(plannerInstructions ?? "", /Use snake_case helpers and keep tests updated\./);
+  assert.match(plannerInstructions ?? "", /Task: Apply change/);
+  assert.match(executorInstructions ?? "", /Repository instructions file: .*AGENTS\.md/);
+  assert.match(executorInstructions ?? "", /Use snake_case helpers and keep tests updated\./);
+  assert.match(executorInstructions ?? "", /Do the work/);
+  assert.equal(job.events.some((event) => /Loaded repository instructions/.test(event.message)), true);
+}
+
 async function testResumeFlow(): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "felix-resume-"));
   await ensureFelixDirectories(root);
@@ -2118,6 +2168,7 @@ async function main(): Promise<void> {
   await testPlanRefinementCollapsesCoupledTestWorkItems();
   await testPlanRefinementKeepsIndependentWorkItemsSplit();
   await testPlannerAndExecutionFlow();
+  await testStartJobLoadsRepoAgentsInstructionsAndPassesThemToPlannerAndExecutor();
   await testResumeFlow();
   await testLongRunningExecutionPersistsHeartbeatWarning();
   await testInvalidStateFailsValidation();

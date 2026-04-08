@@ -130,6 +130,8 @@ Then start a job from the repo root:
 felixai job start --repo . --task "Describe the change you want"
 ```
 
+If the repo has a root-level `AGENTS.md`, FelixAI reads it automatically on jobs and uses that guidance for both planning and execution.
+
 Useful options:
 
 ```powershell

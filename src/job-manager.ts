@@ -182,6 +182,52 @@ function createJobId(): string {
   return `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+async function loadRepoInstructions(repoRoot: string): Promise<{ path: string; content: string } | undefined> {
+  const instructionsPath = path.join(repoRoot, "AGENTS.md");
+  try {
+    const content = await readFile(instructionsPath, "utf8");
+    const trimmed = content.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    return {
+      path: instructionsPath,
+      content: trimmed
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function buildInstructionAwareTask(task: string, repoInstructions: { path: string; content: string } | undefined): string {
+  if (!repoInstructions) {
+    return task;
+  }
+
+  return [
+    `Repository instructions file: ${repoInstructions.path}`,
+    "Apply these repository-specific instructions throughout this planning session unless the user explicitly overrides them.",
+    repoInstructions.content,
+    "",
+    `Task: ${task}`
+  ].join("\n");
+}
+
+function buildInstructionAwarePrompt(prompt: string, repoInstructions: { path: string; content: string } | undefined): string {
+  if (!repoInstructions) {
+    return prompt;
+  }
+
+  return [
+    `Repository instructions file: ${repoInstructions.path}`,
+    "Apply these repository-specific instructions throughout this work item unless the user explicitly overrides them.",
+    repoInstructions.content,
+    "",
+    prompt
+  ].join("\n");
+}
+
 function jobToken(jobId: string): string {
   return jobId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "job";
 }
@@ -533,9 +579,13 @@ export class JobManager {
     if (dirtyWorkingTree) {
       job = addEvent(job, "warn", "job", "Repository has uncommitted changes; proceeding because dirty working trees are allowed.");
     }
+    const repoInstructions = await loadRepoInstructions(repoRoot);
+    if (repoInstructions) {
+      job = addEvent(job, "info", "job", `Loaded repository instructions from ${repoInstructions.path}.`);
+    }
     await this.deps.store.saveJob(job);
 
-    const validatedPlan = validatePlanResult(await this.deps.planner(request.task, repoRoot, baseBranch));
+    const validatedPlan = validatePlanResult(await this.deps.planner(buildInstructionAwareTask(request.task, repoInstructions), repoRoot, baseBranch));
     const plan = validatePlanResult(refinePlanResult(validatedPlan));
     await this.deps.store.savePlan(job.jobId, {
       jobId: job.jobId,
@@ -1001,6 +1051,7 @@ export class JobManager {
 
   private async executeSingleItem(jobId: string, workItemId: string): Promise<JobState> {
     let job = await this.deps.store.loadJob(jobId);
+    const repoInstructions = await loadRepoInstructions(job.repoRoot);
     const item = job.workItems.find((entry) => entry.id === workItemId);
     if (!item) {
       throw new Error(`Unknown work item '${workItemId}'.`);
@@ -1105,7 +1156,7 @@ export class JobManager {
         let result: ExecutionResult;
         try {
           result = await this.deps.executor({
-            prompt: item.prompt,
+            prompt: buildInstructionAwarePrompt(item.prompt, repoInstructions),
             workspacePath: workspace.workspacePath,
             branchName: workspace.branchName,
             sessionId,

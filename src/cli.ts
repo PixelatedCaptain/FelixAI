@@ -150,6 +150,15 @@ function parseIsoTimestamp(value: string | undefined): number | undefined {
   return Number.isNaN(parsed) ? undefined : parsed;
 }
 
+function findRepoInstructionsPath(job: JobState): string | undefined {
+  const event = job.events.find((entry) => /Loaded repository instructions from /i.test(entry.message));
+  if (!event) {
+    return undefined;
+  }
+
+  return event.message.replace(/^.*Loaded repository instructions from /i, "").replace(/\.$/, "");
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -269,6 +278,10 @@ async function main(): Promise<void> {
           });
           console.log(`[felixai] job ${job.jobId} status: ${job.status}`);
           console.log(`[felixai] planner summary: ${job.planningSummary ?? "n/a"}`);
+          const repoInstructionsPath = findRepoInstructionsPath(job);
+          if (repoInstructionsPath) {
+            console.log(`[felixai] repo instructions: ${repoInstructionsPath}`);
+          }
           if (job.issueRefs.length > 0) {
             console.log(`[felixai] issue refs: ${job.issueRefs.join(", ")}`);
           }
@@ -291,6 +304,10 @@ async function main(): Promise<void> {
             console.log(`[felixai] issue refs: ${job.issueRefs.join(", ")}`);
           }
           console.log(`[felixai] planning summary: ${job.planningSummary ?? "n/a"}`);
+          const repoInstructionsPath = findRepoInstructionsPath(job);
+          if (repoInstructionsPath) {
+            console.log(`[felixai] repo instructions: ${repoInstructionsPath}`);
+          }
           console.log(
             `[felixai] work items: pending=${summary.pending} running=${summary.running} boundary=${summary.boundary} blocked=${summary.blocked} completed=${summary.completed} failed=${summary.failed}`
           );

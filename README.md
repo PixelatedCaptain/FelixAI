@@ -246,6 +246,7 @@ Merge automation attempts are persisted separately from merge-readiness analysis
 ## Repo policy
 
 FelixAI validates that the target path is a Git repository and that the selected base branch exists.
+When a repo contains a root-level `AGENTS.md`, FelixAI automatically reads it during jobs and passes that guidance through to the planner and executor.
 
 - By default, dirty working trees are allowed.
 - Use `--require-clean` on `job start` to block execution when the repo has uncommitted changes.
