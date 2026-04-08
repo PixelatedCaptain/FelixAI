@@ -17,15 +17,15 @@ Encapsulates Codex SDK usage for:
 - planner turns
 - execution turns
 - same-thread resume
-- explicit credential-source enforcement
+- Codex-session-only credential enforcement
 
 ## Credential model
 
-- FelixAI must run with one configured credential source per installation.
-- Supported modes are `chatgpt-session` and `env-api-key`.
-- `chatgpt-session` must ignore ambient `OPENAI_API_KEY` values.
-- `env-api-key` must fail fast if `OPENAI_API_KEY` is missing.
-- Credential selection belongs to local agent configuration, while multi-user access belongs to the future relay.
+- FelixAI must run with the local Codex session only.
+- The persisted credential mode is `codex`.
+- Ambient API-key auth must be ignored so FelixAI does not silently switch away from Codex.
+- FelixAI can invoke Codex's native `login`, `login status`, and `logout` commands, but Codex remains the owner of the stored session material.
+- Credential behavior belongs to local agent configuration, while multi-user access belongs to the future relay.
 
 ### Workspace manager
 

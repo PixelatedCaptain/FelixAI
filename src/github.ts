@@ -1,5 +1,11 @@
 import { runCommand } from "./process-utils.js";
 
+function buildEnvWithoutGitHubToken(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.GITHUB_TOKEN;
+  return env;
+}
+
 function normalizeRemoteUrl(remoteUrl: string): string {
   return remoteUrl.trim().replace(/\.git$/, "");
 }
@@ -30,6 +36,20 @@ export async function createPullRequest(options: {
   body: string;
   draft?: boolean;
 }): Promise<{ number?: number; url?: string; status: "draft" | "open" }> {
+  return createPullRequestWithRunner(options, runCommand);
+}
+
+export async function createPullRequestWithRunner(
+  options: {
+    repoPath: string;
+    baseBranch: string;
+    headBranch: string;
+    title: string;
+    body: string;
+    draft?: boolean;
+  },
+  runner: typeof runCommand
+): Promise<{ number?: number; url?: string; status: "draft" | "open" }> {
   const args = [
     "pr",
     "create",
@@ -46,12 +66,94 @@ export async function createPullRequest(options: {
     args.push("--draft");
   }
 
-  const result = await runCommand("gh", args, { cwd: options.repoPath });
-  const url = result.stdout.split(/\r?\n/).find((line) => /^https:\/\/github\.com\//i.test(line.trim()))?.trim();
-  const numberMatch = url?.match(/\/pull\/(\d+)$/);
-  return {
-    number: numberMatch ? Number.parseInt(numberMatch[1], 10) : undefined,
-    url,
-    status: options.draft ? "draft" : "open"
-  };
+  try {
+    const result = await runner("gh", args, { cwd: options.repoPath });
+    const url = result.stdout.split(/\r?\n/).find((line) => /^https:\/\/github\.com\//i.test(line.trim()))?.trim();
+    const numberMatch = url?.match(/\/pull\/(\d+)$/);
+    return {
+      number: numberMatch ? Number.parseInt(numberMatch[1], 10) : undefined,
+      url,
+      status: options.draft ? "draft" : "open"
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const ghAuthStatus = await getGitHubCliStatusWithRunner(options.repoPath, runner);
+    if (hasGitHubTokenPrecedenceConflict(ghAuthStatus)) {
+      try {
+        const result = await runner("gh", args, {
+          cwd: options.repoPath,
+          env: buildEnvWithoutGitHubToken()
+        });
+        const url = result.stdout.split(/\r?\n/).find((line) => /^https:\/\/github\.com\//i.test(line.trim()))?.trim();
+        const numberMatch = url?.match(/\/pull\/(\d+)$/);
+        return {
+          number: numberMatch ? Number.parseInt(numberMatch[1], 10) : undefined,
+          url,
+          status: options.draft ? "draft" : "open"
+        };
+      } catch (retryError) {
+        const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+        const existingUrl = extractPullRequestUrl(retryMessage);
+        if (existingUrl) {
+          const existingNumberMatch = existingUrl.match(/\/pull\/(\d+)$/);
+          return {
+            number: existingNumberMatch ? Number.parseInt(existingNumberMatch[1], 10) : undefined,
+            url: existingUrl,
+            status: "open"
+          };
+        }
+
+        throw new Error(retryMessage);
+      }
+    }
+
+    throw new Error(message);
+  }
+}
+
+function extractPullRequestUrl(message: string): string | undefined {
+  const match = message.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/i);
+  return match?.[0];
+}
+
+export async function getGitHubCliStatus(repoPath: string): Promise<string | undefined> {
+  return getGitHubCliStatusWithRunner(repoPath, runCommand);
+}
+
+export async function getGitHubCliStatusWithRunner(repoPath: string, runner: typeof runCommand): Promise<string | undefined> {
+  try {
+    const result = await runner("gh", ["auth", "status"], { cwd: repoPath });
+    return [result.stdout, result.stderr].filter((value) => value.length > 0).join("\n").trim() || undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+export function hasGitHubTokenPrecedenceConflict(statusText?: string): boolean {
+  if (!statusText) {
+    return false;
+  }
+
+  const invalidEnvToken =
+    /failed to log in to github\.com using token \(github_token\)/i.test(statusText) ||
+    /token in github_token is invalid/i.test(statusText);
+  const keyringLoginExists =
+    /logged in to github\.com account .* \(keyring\)/i.test(statusText) &&
+    /active account:\s*false/i.test(statusText);
+
+  return invalidEnvToken && keyringLoginExists;
+}
+
+export function buildPullRequestFailureMessage(error: string, ghAuthStatus?: string): string {
+  const normalizedError = error.trim();
+  const normalizedAuth = ghAuthStatus?.trim();
+  if (!normalizedAuth) {
+    return normalizedError;
+  }
+
+  if (hasGitHubTokenPrecedenceConflict(normalizedAuth)) {
+    return `${normalizedError}\nGitHub CLI has a valid keyring login, but an invalid GITHUB_TOKEN is taking precedence. Clear or fix GITHUB_TOKEN and retry.`;
+  }
+
+  return `${normalizedError}\nGitHub CLI status:\n${normalizedAuth}`;
 }

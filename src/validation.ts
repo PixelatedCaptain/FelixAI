@@ -60,7 +60,15 @@ export function migrateConfig(raw: unknown): FelixConfig {
 
   const schemaVersion = raw.schemaVersion;
   if (schemaVersion === undefined || schemaVersion === STATE_SCHEMA_VERSION) {
-    return raw as unknown as FelixConfig;
+    const migrated = { ...raw } as Record<string, unknown>;
+    if (
+      migrated.credentialSource === "chatgpt-session" ||
+      migrated.credentialSource === "env-api-key" ||
+      migrated.credentialSource === undefined
+    ) {
+      migrated.credentialSource = "codex";
+    }
+    return migrated as unknown as FelixConfig;
   }
 
   throw new Error(`Unsupported FelixAI config schema version '${String(schemaVersion)}'.`);
@@ -75,7 +83,7 @@ export function validateConfig(config: FelixConfig): FelixConfig {
   if (config.defaultBaseBranch !== undefined) {
     assertString(config.defaultBaseBranch, "FelixAI config defaultBaseBranch must be a non-empty string.");
   }
-  assertEnum(config.credentialSource, ["chatgpt-session", "env-api-key"], "FelixAI config credentialSource is invalid.");
+  assertEnum(config.credentialSource, ["codex"], "FelixAI config credentialSource is invalid.");
   assertRecord(config.git, "FelixAI config must include a git object.");
   assertBoolean(config.git.allowDirtyWorkingTree, "FelixAI git.allowDirtyWorkingTree must be a boolean.");
 
@@ -212,6 +220,9 @@ export function validateJobState(job: JobState): JobState {
     }
     if (pullRequest.pullRequestUrl !== undefined) {
       assertString(pullRequest.pullRequestUrl, "Each pull request entry pullRequestUrl must be a non-empty string when present.");
+    }
+    if (pullRequest.error !== undefined) {
+      assertString(pullRequest.error, "Each pull request entry error must be a non-empty string when present.");
     }
     assertEnum(pullRequest.status, ["not-created", "draft", "open", "merged", "closed"], "Pull request status is invalid.");
     assertString(pullRequest.updatedAt, "Each pull request entry updatedAt must be a non-empty string.");
@@ -356,6 +367,39 @@ export function validatePlanResult(plan: PlanResult): PlanResult {
   return plan;
 }
 
+const TEST_RELATED_PATTERN =
+  /\b(test|tests|testing|unit test|integration test|e2e|spec|specs|coverage|verify|verification|validate|validation|assert)\b/i;
+
+export function refinePlanResult(plan: PlanResult): PlanResult {
+  let workItems = [...plan.workItems];
+  let collapsedCount = 0;
+
+  while (true) {
+    const mergeCandidate = findCoupledWorkItemPair(workItems);
+    if (!mergeCandidate) {
+      break;
+    }
+
+    workItems = collapseDependentWorkItem(workItems, mergeCandidate.parentId, mergeCandidate.childId);
+    collapsedCount += 1;
+  }
+
+  if (collapsedCount === 0) {
+    return plan;
+  }
+
+  const summarySuffix =
+    collapsedCount === 1
+      ? "FelixAI collapsed 1 coupled verification item into its parent work item before execution."
+      : `FelixAI collapsed ${collapsedCount} coupled verification items into parent work items before execution.`;
+
+  return {
+    ...plan,
+    summary: `${plan.summary} ${summarySuffix}`.trim(),
+    workItems
+  };
+}
+
 function validatePlannedWorkItem(item: PlannedWorkItem): void {
   assertRecord(item, "Each planner work item must be an object.");
   assertString(item.id, "Each planner work item must include id.");
@@ -363,6 +407,92 @@ function validatePlannedWorkItem(item: PlannedWorkItem): void {
   assertString(item.prompt, "Each planner work item must include prompt.");
   assertStringArray(item.dependsOn, `Planner work item '${item.id}' dependsOn must be an array of strings.`);
   assertOptionalStringArray(item.issueRefs, `Planner work item '${item.id}' issueRefs must be an array of strings when present.`);
+}
+
+function findCoupledWorkItemPair(
+  workItems: PlannedWorkItem[]
+): {
+  parentId: string;
+  childId: string;
+} | undefined {
+  const byId = new Map(workItems.map((item) => [item.id, item]));
+
+  for (const item of workItems) {
+    if (item.dependsOn.length !== 1 || !isLikelyVerificationItem(item)) {
+      continue;
+    }
+
+    const parent = byId.get(item.dependsOn[0]);
+    if (!parent || isLikelyVerificationItem(parent)) {
+      continue;
+    }
+
+    return {
+      parentId: parent.id,
+      childId: item.id
+    };
+  }
+
+  return undefined;
+}
+
+function isLikelyVerificationItem(item: PlannedWorkItem): boolean {
+  const text = `${item.title} ${item.prompt}`;
+  return TEST_RELATED_PATTERN.test(text);
+}
+
+function collapseDependentWorkItem(
+  workItems: PlannedWorkItem[],
+  parentId: string,
+  childId: string
+): PlannedWorkItem[] {
+  const parent = workItems.find((item) => item.id === parentId);
+  const child = workItems.find((item) => item.id === childId);
+  if (!parent || !child) {
+    return workItems;
+  }
+
+  const mergedParent: PlannedWorkItem = {
+    ...parent,
+    title: mergeTitles(parent.title, child.title),
+    prompt: mergePrompts(parent.prompt, child.prompt),
+    dependsOn: [...new Set(parent.dependsOn)],
+    issueRefs: mergeIssueRefs(parent.issueRefs, child.issueRefs)
+  };
+
+  return workItems
+    .filter((item) => item.id !== childId)
+    .map((item) => {
+      if (item.id === parentId) {
+        return mergedParent;
+      }
+
+      if (!item.dependsOn.includes(childId)) {
+        return item;
+      }
+
+      return {
+        ...item,
+        dependsOn: [...new Set(item.dependsOn.map((dependency) => (dependency === childId ? parentId : dependency)))]
+      };
+    });
+}
+
+function mergeTitles(parentTitle: string, childTitle: string): string {
+  return parentTitle === childTitle ? parentTitle : `${parentTitle} and ${childTitle}`.slice(0, 160);
+}
+
+function mergePrompts(parentPrompt: string, childPrompt: string): string {
+  if (parentPrompt.includes(childPrompt)) {
+    return parentPrompt;
+  }
+
+  return `${parentPrompt}\n\nAlso complete this coupled follow-up in the same work item:\n${childPrompt}`;
+}
+
+function mergeIssueRefs(left: string[] | undefined, right: string[] | undefined): string[] | undefined {
+  const merged = [...new Set([...(left ?? []), ...(right ?? [])])];
+  return merged.length > 0 ? merged : undefined;
 }
 
 function assertAcyclicPlan(workItems: PlannedWorkItem[]): void {

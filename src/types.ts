@@ -2,7 +2,7 @@ import type { ApprovalMode, ModelReasoningEffort, SandboxMode, WebSearchMode } f
 
 export const STATE_SCHEMA_VERSION = 1;
 
-export type CredentialSource = "chatgpt-session" | "env-api-key";
+export type CredentialSource = "codex";
 export type JobStatus = "planning" | "ready" | "running" | "paused" | "completed" | "failed";
 export type WorkItemStatus = "pending" | "running" | "boundary" | "blocked" | "completed" | "failed";
 export type SessionStatus = "pending" | "running" | "boundary" | "blocked" | "completed" | "failed";
@@ -156,6 +156,7 @@ export interface PullRequestLink {
   compareUrl?: string;
   pullRequestNumber?: number;
   pullRequestUrl?: string;
+  error?: string;
   status: PullRequestStatus;
   updatedAt: string;
 }
