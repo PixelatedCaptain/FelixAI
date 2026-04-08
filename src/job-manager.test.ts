@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { buildPlanningPrompt } from "./codex-adapter.js";
 import { DEFAULT_CONFIG, ensureFelixDirectories, loadConfig } from "./config.js";
+import { analyzeGitHubAuthStatus } from "./doctor.js";
 import { pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
+import { commitAllChanges, getBranchPushStatus } from "./git.js";
+import { buildPullRequestFailureMessage, createPullRequestWithRunner, hasGitHubTokenPrecedenceConflict } from "./github.js";
 import { initializeProject } from "./init.js";
-import { JobManager } from "./job-manager.js";
+import { createJobManager, JobManager } from "./job-manager.js";
+import { runCommand } from "./process-utils.js";
 import { StateStore } from "./state-store.js";
+import { refinePlanResult } from "./validation.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import type { ExecutionResult, FelixConfig, JobState, PlanResult, WorkspaceAssignment } from "./types.js";
 
@@ -56,6 +64,93 @@ async function testInvalidConfigFailsValidation(): Promise<void> {
   });
 
   await assert.rejects(loadConfig(root), /credentialSource/);
+}
+
+async function testLegacyCredentialModesMigrateToCodex(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-config-migrate-"));
+  await ensureFelixDirectories(root);
+
+  await writeJsonFile(path.join(root, ".felixai", "config.json"), {
+    schemaVersion: 1,
+    stateDir: ".felixai/state",
+    workspaceRoot: ".felixai/workspaces",
+    logDir: ".felixai/logs",
+    credentialSource: "chatgpt-session",
+    git: DEFAULT_CONFIG.git,
+    codex: DEFAULT_CONFIG.codex
+  });
+
+  const migratedChatSession = await loadConfig(root);
+  assert.equal(migratedChatSession.credentialSource, "codex");
+
+  await writeJsonFile(path.join(root, ".felixai", "config.json"), {
+    schemaVersion: 1,
+    stateDir: ".felixai/state",
+    workspaceRoot: ".felixai/workspaces",
+    logDir: ".felixai/logs",
+    credentialSource: "env-api-key",
+    git: DEFAULT_CONFIG.git,
+    codex: DEFAULT_CONFIG.codex
+  });
+
+  const migratedApiKey = await loadConfig(root);
+  assert.equal(migratedApiKey.credentialSource, "codex");
+}
+
+async function testPlanningPromptDiscouragesVerificationOnlyWorkItems(): Promise<void> {
+  const prompt = buildPlanningPrompt("Update README only", "main");
+  assert.match(prompt, /Do not create separate verification-only, review-only, or diff-check-only work items/i);
+  assert.match(prompt, /Avoid no-op work items that would leave their branch with no changes relative to the base branch/i);
+  assert.match(prompt, /Only create a separate verification work item when it produces a durable artifact/i);
+}
+
+async function testPlanRefinementCollapsesCoupledTestWorkItems(): Promise<void> {
+  const refined = refinePlanResult({
+    summary: "Split implementation and tests",
+    workItems: [
+      {
+        id: "WI-1",
+        title: "Trim input in formatGreeting while preserving default behavior",
+        prompt: "Update src/index.js to trim surrounding whitespace before formatting the greeting.",
+        dependsOn: []
+      },
+      {
+        id: "WI-2",
+        title: "Add trimming coverage and keep npm test passing",
+        prompt: "Update test/index.test.js to cover trimming behavior and run npm test.",
+        dependsOn: ["WI-1"]
+      }
+    ]
+  });
+
+  assert.equal(refined.workItems.length, 1);
+  assert.equal(refined.workItems[0]?.id, "WI-1");
+  assert.match(refined.workItems[0]?.title ?? "", /Add trimming coverage/i);
+  assert.match(refined.workItems[0]?.prompt ?? "", /test\/index\.test\.js/i);
+  assert.match(refined.summary, /collapsed 1 coupled verification item/i);
+}
+
+async function testPlanRefinementKeepsIndependentWorkItemsSplit(): Promise<void> {
+  const refined = refinePlanResult({
+    summary: "Two independent items",
+    workItems: [
+      {
+        id: "WI-1",
+        title: "Implement API endpoint",
+        prompt: "Update src/api.ts to add the new endpoint.",
+        dependsOn: []
+      },
+      {
+        id: "WI-2",
+        title: "Add dashboard widget",
+        prompt: "Update src/dashboard.tsx for the new widget.",
+        dependsOn: []
+      }
+    ]
+  });
+
+  assert.equal(refined.workItems.length, 2);
+  assert.equal(refined.summary, "Two independent items");
 }
 
 async function testPlannerAndExecutionFlow(): Promise<void> {
@@ -165,6 +260,47 @@ async function testResumeFlow(): Promise<void> {
 
   const saved = await readJsonFile<JobState>(path.join(root, ".felixai", "state", "jobs", `${started.jobId}.json`));
   assert.equal(saved.status, "completed");
+}
+
+async function testLongRunningExecutionPersistsHeartbeatWarning(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-heartbeat-"));
+  await ensureFelixDirectories(root);
+
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store,
+    executionHeartbeatMs: 20,
+    staleRunningWarningMs: 40,
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "Single long-running item",
+      workItems: [{ id: "slow", title: "Slow item", prompt: "Slow item", dependsOn: [] }]
+    }),
+    executor: async (): Promise<ExecutionResult> => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      return {
+        status: "completed",
+        summary: "finished",
+        sessionId: "slow-session"
+      };
+    }
+  });
+
+  const job = await manager.startJob({
+    repoPath: root,
+    task: "exercise heartbeat"
+  });
+
+  assert.equal(job.status, "completed");
+  assert.equal(job.events.some((event) => /Execution still running after/i.test(event.message)), true);
 }
 
 async function testInvalidStateFailsValidation(): Promise<void> {
@@ -648,6 +784,22 @@ async function testWorkspaceManagerReusesAndReattachesExistingWorktrees(): Promi
   assert.equal(recreated.mode, "created");
 }
 
+async function testWorkspaceManagerUsesUniqueBranchNamesPerJob(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-branch-unique-"));
+  const repoRoot = path.join(root, "repo");
+  const manager = new WorkspaceManager(path.join(root, ".felixai", "workspaces"), {
+    pathExists: async () => false,
+    pruneWorktrees: async () => {},
+    listWorktrees: async () => [],
+    createWorktree: async () => {}
+  });
+
+  const first = await manager.ensureWorkspace("20260407024625-1e5badd8", "api", "main", repoRoot, []);
+  const second = await manager.ensureWorkspace("20260407025121-e0f2e086", "api", "main", repoRoot, []);
+
+  assert.notEqual(first.branchName, second.branchName);
+}
+
 async function testWorkspaceConflictIsClassifiedAndPersisted(): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "felix-workspace-conflict-"));
   await ensureFelixDirectories(root);
@@ -688,6 +840,62 @@ async function testWorkspaceConflictIsClassifiedAndPersisted(): Promise<void> {
   assert.equal(job.workItems[0].failureCategory, "workspace-conflict");
   assert.equal(job.workItems[0].retryable, false);
   assert.equal(job.events.some((event) => event.scope === "workspace" && /workspace-conflict/i.test(event.message)), true);
+}
+
+async function testBranchDriftFailsWorkItemInsteadOfRecordingWrongBranch(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-branch-drift-"));
+  const repo = path.join(root, "repo");
+  await mkdir(repo, { recursive: true });
+  await ensureFelixDirectories(root);
+
+  await runCommand("git", ["init", "--initial-branch=main"], { cwd: repo });
+  await runCommand("git", ["config", "user.email", "felix@example.com"], { cwd: repo });
+  await runCommand("git", ["config", "user.name", "Felix Test"], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# Test Repo\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const config: FelixConfig = {
+    ...DEFAULT_CONFIG,
+    workspaceRoot: ".felixai/workspaces",
+    stateDir: ".felixai/state",
+    logDir: ".felixai/logs"
+  };
+
+  const manager = new JobManager({
+    config,
+    store: new StateStore(root, { stateDir: config.stateDir, logDir: config.logDir }),
+    resolveRepoContext: async () => ({
+      repoRoot: repo,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: new WorkspaceManager(path.join(root, ".felixai", "workspaces")),
+    planner: async (): Promise<PlanResult> => ({
+      summary: "branch drift",
+      workItems: [{ id: "api", title: "API", prompt: "Change README", dependsOn: [] }]
+    }),
+    executor: async ({ workspacePath, branchName }): Promise<ExecutionResult> => {
+      assert.ok(branchName);
+      await runCommand("git", ["-C", workspacePath, "checkout", "-b", "agent/drifted-branch"]);
+      await writeFile(path.join(workspacePath, "README.md"), "# Drifted\n", "utf8");
+      return {
+        status: "completed",
+        summary: "Switched to a different branch",
+        sessionId: "session-drift"
+      };
+    }
+  });
+
+  const job = await manager.startJob({
+    repoPath: repo,
+    task: "branch drift"
+  });
+
+  assert.equal(job.status, "failed");
+  assert.equal(job.workItems[0]?.status, "failed");
+  assert.match(job.workItems[0]?.error ?? "", /branch drift detected/i);
+  assert.equal(job.workItems[0]?.failureCategory, "git");
 }
 
 async function testBlockedExecutionIsPersistedForManualReview(): Promise<void> {
@@ -955,6 +1163,323 @@ async function testCreateJobPullRequestsPersistsLinks(): Promise<void> {
   assert.match(job.pullRequests[0]?.pullRequestUrl ?? "", /\/pull\/10$/);
 }
 
+async function testCreateJobPullRequestsPersistsFailureReason(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-pr-failure-"));
+  await ensureFelixDirectories(root);
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store: new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir }),
+    createPullRequests: async (job) => [
+      {
+        workItemId: job.workItems[0].id,
+        sourceBranch: job.workItems[0].branchName as string,
+        targetBranch: "main",
+        issueRefs: [],
+        title: job.workItems[0].title,
+        body: "PR body",
+        compareUrl: `https://github.com/example/repo/compare/main...${job.workItems[0].branchName as string}`,
+        error: "GitHub CLI has a valid keyring login, but an invalid GITHUB_TOKEN is taking precedence.",
+        status: "not-created",
+        updatedAt: new Date().toISOString()
+      }
+    ],
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId, _baseBranch, _repoRoot, issueRefs) =>
+        createFakeWorkspaceForIssues(root, jobId, workItemId, issueRefs)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "pr failure",
+      workItems: [{ id: "api", title: "API", prompt: "API", dependsOn: [] }]
+    }),
+    executor: async (): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: "done",
+      sessionId: "session-api"
+    })
+  });
+
+  const started = await manager.startJob({
+    repoPath: root,
+    task: "pr failure"
+  });
+  const job = await manager.createJobPullRequests(started.jobId);
+  assert.equal(job.pullRequests[0]?.status, "not-created");
+  assert.match(job.pullRequests[0]?.error ?? "", /invalid GITHUB_TOKEN/i);
+}
+
+async function testBuildPullRequestFailureMessageAddsGitHubTokenHint(): Promise<void> {
+  const message = buildPullRequestFailureMessage(
+    "failed to create pull request",
+    [
+      "github.com",
+      "  X Failed to log in to github.com using token (GITHUB_TOKEN)",
+      "  - Active account: true",
+      "  - The token in GITHUB_TOKEN is invalid.",
+      "  ",
+      "  ✓ Logged in to github.com account PixelatedCaptain (keyring)",
+      "  - Active account: false"
+    ].join("\n")
+  );
+
+  assert.match(message, /invalid GITHUB_TOKEN is taking precedence/i);
+}
+
+async function testDoctorDetectsGitHubTokenPrecedenceConflict(): Promise<void> {
+  const check = analyzeGitHubAuthStatus(
+    [
+      "github.com",
+      "  X Failed to log in to github.com using token (GITHUB_TOKEN)",
+      "  - Active account: true",
+      "  - The token in GITHUB_TOKEN is invalid.",
+      "  ",
+      "  ✓ Logged in to github.com account PixelatedCaptain (keyring)",
+      "  - Active account: false",
+      "  - Token scopes: 'repo'"
+    ].join("\n")
+  );
+
+  assert.equal(check.status, "warn");
+  assert.match(check.detail ?? "", /invalid GITHUB_TOKEN/i);
+}
+
+async function testGitHubConflictDetectionHelper(): Promise<void> {
+  const conflicted = hasGitHubTokenPrecedenceConflict(
+    [
+      "github.com",
+      "X Failed to log in to github.com using token (GITHUB_TOKEN)",
+      "The token in GITHUB_TOKEN is invalid.",
+      "Logged in to github.com account PixelatedCaptain (keyring)",
+      "Active account: false"
+    ].join("\n")
+  );
+  assert.equal(conflicted, true);
+}
+
+async function testCreatePullRequestRetriesWithoutGitHubTokenWhenKeyringLoginExists(): Promise<void> {
+  let sawRetryWithoutToken = false;
+  let callCount = 0;
+  const runner = async (
+    command: string,
+    args: string[],
+    options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}
+  ): Promise<{ stdout: string; stderr: string }> => {
+    callCount += 1;
+    if (command !== "gh") {
+      throw new Error("unexpected command");
+    }
+
+    if (args[0] === "auth" && args[1] === "status") {
+      return {
+        stdout: [
+          "github.com",
+          "X Failed to log in to github.com using token (GITHUB_TOKEN)",
+          "The token in GITHUB_TOKEN is invalid.",
+          "Logged in to github.com account PixelatedCaptain (keyring)",
+          "Active account: false"
+        ].join("\n"),
+        stderr: ""
+      };
+    }
+
+    if (args[0] === "pr" && args[1] === "create") {
+      if (options.env && !("GITHUB_TOKEN" in options.env)) {
+        sawRetryWithoutToken = true;
+        return {
+          stdout: "https://github.com/example/repo/pull/123",
+          stderr: ""
+        };
+      }
+
+      throw new Error("HTTP 401: Bad credentials");
+    }
+
+    throw new Error("unexpected gh invocation");
+  };
+
+  const created = await createPullRequestWithRunner(
+    {
+      repoPath: "C:\\repo",
+      baseBranch: "main",
+      headBranch: "feature/test",
+      title: "Title",
+      body: "Body",
+      draft: true
+    },
+    runner
+  );
+
+  assert.equal(callCount >= 3, true);
+  assert.equal(sawRetryWithoutToken, true);
+  assert.equal(created.status, "draft");
+  assert.equal(created.number, 123);
+}
+
+async function testCreatePullRequestReturnsExistingPullRequestWhenRetryFindsOne(): Promise<void> {
+  const runner = async (
+    command: string,
+    args: string[],
+    options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}
+  ): Promise<{ stdout: string; stderr: string }> => {
+    if (command !== "gh") {
+      throw new Error("unexpected command");
+    }
+
+    if (args[0] === "auth" && args[1] === "status") {
+      return {
+        stdout: [
+          "github.com",
+          "X Failed to log in to github.com using token (GITHUB_TOKEN)",
+          "The token in GITHUB_TOKEN is invalid.",
+          "Logged in to github.com account PixelatedCaptain (keyring)",
+          "Active account: false"
+        ].join("\n"),
+        stderr: ""
+      };
+    }
+
+    if (args[0] === "pr" && args[1] === "create") {
+      if (options.env && !("GITHUB_TOKEN" in options.env)) {
+        throw new Error(
+          [
+            'a pull request for branch "feature/test" into branch "main" already exists:',
+            "https://github.com/example/repo/pull/77"
+          ].join("\n")
+        );
+      }
+
+      throw new Error("HTTP 401: Bad credentials");
+    }
+
+    throw new Error("unexpected gh invocation");
+  };
+
+  const created = await createPullRequestWithRunner(
+    {
+      repoPath: "C:\\repo",
+      baseBranch: "main",
+      headBranch: "feature/test",
+      title: "Title",
+      body: "Body",
+      draft: true
+    },
+    runner
+  );
+
+  assert.equal(created.status, "open");
+  assert.equal(created.number, 77);
+  assert.equal(created.url, "https://github.com/example/repo/pull/77");
+}
+
+async function testPushMergeAndPrSkipNoOpBranches(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-noop-branches-"));
+  const repo = path.join(root, "repo");
+  const remote = path.join(root, "remote.git");
+  await mkdir(repo, { recursive: true });
+  await ensureFelixDirectories(root);
+
+  await runCommand("git", ["init", "--initial-branch=main"], { cwd: repo });
+  await runCommand("git", ["config", "user.email", "felix@example.com"], { cwd: repo });
+  await runCommand("git", ["config", "user.name", "Felix Test"], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# Test Repo\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "init"], { cwd: repo });
+  await runCommand("git", ["init", "--bare", remote]);
+  await runCommand("git", ["remote", "add", "origin", remote], { cwd: repo });
+  await runCommand("git", ["push", "-u", "origin", "main"], { cwd: repo });
+
+  const changedBranch = "agent/changed/job-noop-test-changed";
+  const noopBranch = "agent/noop/job-noop-test-noop";
+
+  await runCommand("git", ["checkout", "-b", changedBranch], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# Test Repo\nchanged\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "changed"], { cwd: repo });
+  await runCommand("git", ["checkout", "main"], { cwd: repo });
+  await runCommand("git", ["checkout", "-b", noopBranch], { cwd: repo });
+  await runCommand("git", ["checkout", "main"], { cwd: repo });
+
+  const timestamp = new Date().toISOString();
+  const jobId = "20260407-noop-branches";
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  await store.saveJob({
+    schemaVersion: 1,
+    jobId,
+    status: "completed",
+    repoPath: repo,
+    repoRoot: repo,
+    task: "noop branches",
+    issueRefs: [],
+    baseBranch: "main",
+    parallelism: 2,
+    autoResume: false,
+    maxResumesPerItem: 2,
+    planningSummary: "noop branches",
+    workItems: [
+      {
+        id: "changed",
+        title: "Changed",
+        prompt: "changed",
+        issueRefs: [],
+        dependsOn: [],
+        status: "completed",
+        attempts: 1,
+        branchName: changedBranch,
+        completedAt: timestamp
+      },
+      {
+        id: "noop",
+        title: "Noop",
+        prompt: "noop",
+        issueRefs: [],
+        dependsOn: [],
+        status: "completed",
+        attempts: 1,
+        branchName: noopBranch,
+        completedAt: timestamp
+      }
+    ],
+    sessions: [],
+    events: [],
+    mergeReadiness: {
+      completedBranches: [changedBranch, noopBranch],
+      pendingBranches: [],
+      branchReadiness: [],
+      generatedAt: timestamp
+    },
+    mergeAutomation: {
+      targetBranch: "main",
+      mergedBranches: [],
+      pendingBranches: [],
+      conflicts: [],
+      status: "pending"
+    },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: timestamp,
+    updatedAt: timestamp
+  });
+
+  const manager = await createJobManager(root);
+  const pushed = await manager.pushJobBranches(jobId);
+  assert.equal(pushed.remoteBranches.find((branch) => branch.workItemId === "changed")?.pushStatus, "up-to-date");
+  assert.equal(pushed.remoteBranches.find((branch) => branch.workItemId === "noop")?.pushStatus, "branch-not-pushed");
+
+  const prs = await manager.createJobPullRequests(jobId);
+  assert.doesNotMatch(prs.pullRequests.find((entry) => entry.workItemId === "changed")?.error ?? "", /no changes relative to the target branch/i);
+  assert.equal(prs.pullRequests.find((entry) => entry.workItemId === "noop")?.status, "not-created");
+  assert.match(prs.pullRequests.find((entry) => entry.workItemId === "noop")?.error ?? "", /no changes relative to the target branch/i);
+
+  const merged = await manager.mergeJobBranches(jobId);
+  assert.equal(merged.mergeAutomation.status, "merged");
+  assert.deepEqual(merged.mergeAutomation.mergedBranches, [changedBranch]);
+}
+
 async function testResolveJobMergeConflictsPersistsResolution(): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "felix-resolve-conflicts-"));
   await ensureFelixDirectories(root);
@@ -1028,11 +1553,431 @@ async function testResolveJobMergeConflictsPersistsResolution(): Promise<void> {
   assert.equal(resolvedJob.mergeAutomation.resolutionSummary, "Conflicts resolved successfully");
 }
 
+async function testCommitAllChangesCreatesCommitForDirtyWorkspace(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-commit-workspace-"));
+  const repo = path.join(root, "repo");
+  await mkdir(repo, { recursive: true });
+
+  await runCommand("git", ["init"], { cwd: repo });
+  await runCommand("git", ["config", "user.email", "felix@example.com"], { cwd: repo });
+  await runCommand("git", ["config", "user.name", "Felix Test"], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# Test\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "init"], { cwd: repo });
+
+  await writeFile(path.join(repo, "README.md"), "# Test\nupdated\n", "utf8");
+
+  const committed = await commitAllChanges(repo, "felixai: complete WI-1 - Update readme");
+  assert.equal(committed, true);
+
+  const status = await runCommand("git", ["status", "--porcelain"], { cwd: repo });
+  assert.equal(status.stdout, "");
+
+  const log = await runCommand("git", ["log", "--oneline", "-n", "1"], { cwd: repo });
+  assert.match(log.stdout, /felixai: complete WI-1/);
+}
+
+async function testGetBranchPushStatusChecksActualRemoteBranch(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-push-status-"));
+  const repo = path.join(root, "repo");
+  const remote = path.join(root, "remote.git");
+  await mkdir(repo, { recursive: true });
+
+  await runCommand("git", ["init", "--initial-branch=main"], { cwd: repo });
+  await runCommand("git", ["config", "user.email", "felix@example.com"], { cwd: repo });
+  await runCommand("git", ["config", "user.name", "Felix Test"], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# Test\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "init"], { cwd: repo });
+  await runCommand("git", ["init", "--bare", remote]);
+  await runCommand("git", ["remote", "add", "origin", remote], { cwd: repo });
+  await runCommand("git", ["push", "-u", "origin", "main"], { cwd: repo });
+
+  await runCommand("git", ["checkout", "-b", "feature/push-status"], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# Test\nremote status\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "feature"], { cwd: repo });
+  await runCommand("git", ["push", "-u", "origin", "feature/push-status"], { cwd: repo });
+
+  const synced = await getBranchPushStatus(repo, "feature/push-status", "origin");
+  assert.equal(synced.existsRemotely, true);
+  assert.equal(synced.pushStatus, "up-to-date");
+
+  await writeFile(path.join(repo, "README.md"), "# Test\nremote status\nahead\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "ahead"], { cwd: repo });
+
+  const ahead = await getBranchPushStatus(repo, "feature/push-status", "origin");
+  assert.equal(ahead.existsRemotely, true);
+  assert.equal(ahead.pushStatus, "ahead-of-remote");
+  assert.equal(ahead.aheadBy > 0, true);
+}
+
+async function testRealMergeConflictResolutionKeepsConflictedWorkspaceUntilResolved(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-real-merge-conflict-"));
+  const repo = path.join(root, "repo");
+  await mkdir(repo, { recursive: true });
+  await ensureFelixDirectories(root);
+
+  await runCommand("git", ["init", "--initial-branch=main"], { cwd: repo });
+  await runCommand("git", ["config", "user.email", "felix@example.com"], { cwd: repo });
+  await runCommand("git", ["config", "user.name", "Felix Test"], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# Test Repo\n\nBase line\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const branchA = "agent/a/job-real-conflict-a";
+  const branchB = "agent/b/job-real-conflict-b";
+
+  await runCommand("git", ["checkout", "-b", branchA], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# Test Repo\n\nConflict scenario A\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "scenario-a"], { cwd: repo });
+
+  await runCommand("git", ["checkout", "main"], { cwd: repo });
+  await runCommand("git", ["checkout", "-b", branchB], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# Test Repo\n\nConflict scenario B\n", "utf8");
+  await runCommand("git", ["add", "README.md"], { cwd: repo });
+  await runCommand("git", ["commit", "-m", "scenario-b"], { cwd: repo });
+  await runCommand("git", ["checkout", "main"], { cwd: repo });
+
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store,
+    resolveRepoContext: async () => ({
+      repoRoot: repo,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "unused",
+      workItems: []
+    }),
+    executor: async ({ workspacePath }): Promise<ExecutionResult> => {
+      const conflicted = await runCommand("git", ["-C", workspacePath, "diff", "--name-only", "--diff-filter=U"]);
+      assert.match(conflicted.stdout, /README\.md/);
+      await writeFile(path.join(workspacePath, "README.md"), "# Test Repo\n\nResolved merge conflict\n", "utf8");
+      await runCommand("git", ["-C", workspacePath, "add", "README.md"]);
+      return {
+        status: "completed",
+        summary: "Resolved README conflict",
+        sessionId: "session-resolve-real"
+      };
+    }
+  });
+
+  const timestamp = new Date().toISOString();
+  const jobId = "20260407-real-conflict";
+  await store.saveJob({
+    schemaVersion: 1,
+    jobId,
+    status: "completed",
+    repoPath: repo,
+    repoRoot: repo,
+    task: "real conflict resolution",
+    issueRefs: [],
+    baseBranch: "main",
+    parallelism: 2,
+    autoResume: false,
+    maxResumesPerItem: 2,
+    planningSummary: "real conflict resolution",
+    workItems: [
+      {
+        id: "A",
+        title: "Conflict branch A",
+        prompt: "unused",
+        issueRefs: [],
+        dependsOn: [],
+        status: "completed",
+        attempts: 1,
+        branchName: branchA,
+        completedAt: timestamp
+      },
+      {
+        id: "B",
+        title: "Conflict branch B",
+        prompt: "unused",
+        issueRefs: [],
+        dependsOn: [],
+        status: "completed",
+        attempts: 1,
+        branchName: branchB,
+        completedAt: timestamp
+      }
+    ],
+    sessions: [],
+    events: [],
+    mergeReadiness: {
+      completedBranches: [branchA, branchB],
+      pendingBranches: [],
+      branchReadiness: [],
+      generatedAt: timestamp
+    },
+    mergeAutomation: {
+      targetBranch: "main",
+      mergedBranches: [],
+      pendingBranches: [],
+      conflicts: [],
+      status: "pending"
+    },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: timestamp,
+    updatedAt: timestamp
+  });
+
+  const merged = await manager.mergeJobBranches(jobId);
+  assert.equal(merged.mergeAutomation.status, "conflicted");
+  const mergeWorkspace = merged.mergeAutomation.workspacePath as string;
+  const conflictedFiles = await runCommand("git", ["-C", mergeWorkspace, "diff", "--name-only", "--diff-filter=U"]);
+  assert.match(conflictedFiles.stdout, /README\.md/);
+
+  const resolved = await manager.resolveJobMergeConflicts(jobId);
+  assert.equal(resolved.mergeAutomation.status, "merged");
+  assert.equal(resolved.mergeAutomation.conflicts.length, 0);
+  assert.equal(resolved.mergeAutomation.resolutionSessionId, "session-resolve-real");
+
+  const readme = await readFile(path.join(mergeWorkspace, "README.md"), "utf8");
+  assert.match(readme, /Resolved merge conflict/);
+  const status = await runCommand("git", ["-C", mergeWorkspace, "status", "--porcelain"]);
+  assert.equal(status.stdout, "");
+  const log = await runCommand("git", ["-C", mergeWorkspace, "log", "--oneline", "-n", "1"]);
+  assert.match(log.stdout, /Merge branch/);
+}
+
+async function testCliForcesProcessExitWhenHandlesRemainOpen(): Promise<void> {
+  const cliPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js");
+  const cliUrl = pathToFileURL(cliPath).href;
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        [
+          `process.argv = ['node', ${JSON.stringify(cliPath)}, 'version'];`,
+          "setInterval(() => {}, 60_000);",
+          `await import(${JSON.stringify(cliUrl)});`
+        ].join("\n")
+      ],
+      { stdio: "pipe" }
+    );
+
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout?.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+    child.stderr?.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error("CLI process did not exit while a keepalive handle was open."));
+    }, 10_000);
+
+    child.once("exit", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(
+          new Error(
+            `CLI exited with code ${code}. stdout=${Buffer.concat(stdout).toString("utf8")} stderr=${Buffer.concat(stderr).toString("utf8")}`
+          )
+        );
+        return;
+      }
+
+      const output = Buffer.concat(stdout).toString("utf8");
+      assert.match(output, /\[felixai\] version:/);
+      resolve();
+    });
+
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
+async function testCliStatusHighlightsBranchDriftFailures(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-cli-branch-drift-"));
+  await ensureFelixDirectories(root);
+
+  const jobId = "branch-drift-cli";
+  const timestamp = new Date().toISOString();
+  await writeJsonFile(path.join(root, ".felixai", "state", "jobs", `${jobId}.json`), {
+    schemaVersion: 1,
+    jobId,
+    status: "failed",
+    repoPath: root,
+    repoRoot: root,
+    task: "branch drift cli",
+    issueRefs: [],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: false,
+    maxResumesPerItem: 2,
+    planningSummary: "branch drift cli",
+    workItems: [
+      {
+        id: "api",
+        title: "API",
+        prompt: "API",
+        issueRefs: [],
+        dependsOn: [],
+        status: "failed",
+        attempts: 1,
+        workspacePath: path.join(root, ".felixai", "workspaces", jobId, "api"),
+        branchName: "agent/api/job-branch-drift-cli-api",
+        error: "Workspace branch drift detected: expected 'agent/api/job-branch-drift-cli-api' but Codex left the workspace on 'agent/drifted-branch'.",
+        failureCategory: "git",
+        retryable: true,
+        manualReviewRequired: true,
+        startedAt: timestamp
+      }
+    ],
+    sessions: [
+      {
+        workItemId: "api",
+        sessionId: "session-drift",
+        status: "failed",
+        workspacePath: path.join(root, ".felixai", "workspaces", jobId, "api"),
+        branchName: "agent/api/job-branch-drift-cli-api",
+        attemptCount: 1,
+        lastPrompt: "API",
+        updatedAt: timestamp,
+        error: "Workspace branch drift detected: expected 'agent/api/job-branch-drift-cli-api' but Codex left the workspace on 'agent/drifted-branch'.",
+        failureCategory: "git",
+        retryable: true,
+        manualReviewRequired: true
+      }
+    ],
+    events: [
+      {
+        timestamp,
+        level: "error",
+        scope: "session",
+        workItemId: "api",
+        message: "Work item failed [git]: Workspace branch drift detected."
+      }
+    ],
+    mergeReadiness: {
+      completedBranches: [],
+      pendingBranches: ["agent/api/job-branch-drift-cli-api"],
+      branchReadiness: [],
+      generatedAt: timestamp
+    },
+    mergeAutomation: {
+      targetBranch: "main",
+      mergedBranches: [],
+      pendingBranches: [],
+      conflicts: [],
+      status: "pending"
+    },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: timestamp,
+    updatedAt: timestamp
+  });
+
+  const output = await runCommand(process.execPath, [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js"), "job", "status", jobId], {
+    cwd: root
+  });
+
+  assert.match(output.stdout, /\[felixai\] action required: branch drift detected/);
+  assert.match(output.stdout, /\[felixai\] branch drift api: expected=agent\/api\/job-branch-drift-cli-api/);
+  assert.match(output.stdout, /\[felixai\] branch drift detail: Workspace branch drift detected:/);
+}
+
+async function testCliStatusHighlightsStaleRunningWorkItems(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-running-status-"));
+  await ensureFelixDirectories(root);
+
+  const jobId = "20260408-running-stale";
+  const oldTimestamp = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  await writeJsonFile(path.join(root, ".felixai", "state", "jobs", `${jobId}.json`), {
+    schemaVersion: 1,
+    jobId,
+    status: "running",
+    repoPath: root,
+    repoRoot: root,
+    task: "stale running item",
+    issueRefs: [],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: false,
+    maxResumesPerItem: 2,
+    planningSummary: "stale running",
+    workItems: [
+      {
+        id: "slow",
+        title: "Slow item",
+        prompt: "Slow item",
+        issueRefs: [],
+        dependsOn: [],
+        status: "running",
+        attempts: 1,
+        workspacePath: path.join(root, ".felixai", "workspaces", jobId, "slow"),
+        branchName: "agent/slow/job-running-stale",
+        startedAt: oldTimestamp
+      }
+    ],
+    sessions: [
+      {
+        workItemId: "slow",
+        sessionId: "slow-session",
+        status: "running",
+        workspacePath: path.join(root, ".felixai", "workspaces", jobId, "slow"),
+        branchName: "agent/slow/job-running-stale",
+        attemptCount: 1,
+        lastPrompt: "Slow item",
+        updatedAt: oldTimestamp
+      }
+    ],
+    events: [],
+    mergeReadiness: {
+      completedBranches: [],
+      pendingBranches: ["agent/slow/job-running-stale"],
+      branchReadiness: [],
+      generatedAt: oldTimestamp
+    },
+    mergeAutomation: {
+      targetBranch: "main",
+      mergedBranches: [],
+      pendingBranches: [],
+      conflicts: [],
+      status: "pending"
+    },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: oldTimestamp,
+    updatedAt: oldTimestamp
+  });
+
+  const output = await runCommand(process.execPath, [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js"), "job", "status", jobId], {
+    cwd: root
+  });
+
+  assert.match(output.stdout, /\[felixai\] slow: running .*running_for=/);
+  assert.match(output.stdout, /\[felixai\] slow: running .*signal=stale/);
+  assert.match(output.stdout, /\[felixai\] action required: running work item may be stalled/);
+}
+
 async function main(): Promise<void> {
   await testInit();
   await testInvalidConfigFailsValidation();
+  await testLegacyCredentialModesMigrateToCodex();
+  await testPlanningPromptDiscouragesVerificationOnlyWorkItems();
+  await testPlanRefinementCollapsesCoupledTestWorkItems();
+  await testPlanRefinementKeepsIndependentWorkItemsSplit();
   await testPlannerAndExecutionFlow();
   await testResumeFlow();
+  await testLongRunningExecutionPersistsHeartbeatWarning();
   await testInvalidStateFailsValidation();
   await testRequireCleanRejectsDirtyRepo();
   await testBaseBranchFailureBubblesClearly();
@@ -1044,12 +1989,27 @@ async function main(): Promise<void> {
   await testIssueRefsPropagateToJobsAndBranches();
   await testRemoteBranchMetadataAndIssueSummariesPersist();
   await testWorkspaceManagerReusesAndReattachesExistingWorktrees();
+  await testWorkspaceManagerUsesUniqueBranchNamesPerJob();
   await testWorkspaceConflictIsClassifiedAndPersisted();
+  await testBranchDriftFailsWorkItemInsteadOfRecordingWrongBranch();
   await testBlockedExecutionIsPersistedForManualReview();
   await testPushJobBranchesRefreshesRemoteState();
   await testMergeAutomationPersistsSuccessAndConflict();
   await testCreateJobPullRequestsPersistsLinks();
+  await testCreateJobPullRequestsPersistsFailureReason();
+  await testBuildPullRequestFailureMessageAddsGitHubTokenHint();
+  await testDoctorDetectsGitHubTokenPrecedenceConflict();
+  await testGitHubConflictDetectionHelper();
+  await testCreatePullRequestRetriesWithoutGitHubTokenWhenKeyringLoginExists();
+  await testCreatePullRequestReturnsExistingPullRequestWhenRetryFindsOne();
+  await testPushMergeAndPrSkipNoOpBranches();
   await testResolveJobMergeConflictsPersistsResolution();
+  await testCommitAllChangesCreatesCommitForDirtyWorkspace();
+  await testGetBranchPushStatusChecksActualRemoteBranch();
+  await testRealMergeConflictResolutionKeepsConflictedWorkspaceUntilResolved();
+  await testCliForcesProcessExitWhenHandlesRemainOpen();
+  await testCliStatusHighlightsBranchDriftFailures();
+  await testCliStatusHighlightsStaleRunningWorkItems();
   console.log("job manager tests passed");
 }
 

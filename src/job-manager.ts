@@ -3,14 +3,17 @@ import path from "node:path";
 
 import { loadConfig } from "./config.js";
 import {
-  abortMerge,
   assertGitRepository,
   baseBranchExists,
+  checkoutBranch,
+  commitAllChanges,
+  continueMerge,
   createMergeWorktree,
   getBranchPushStatus,
   getCurrentBranch,
   getPreferredRemote,
   getRemoteUrl,
+  isMergeInProgress,
   isWorkingTreeDirty,
   listConflictedFiles,
   listChangedFiles,
@@ -21,7 +24,7 @@ import {
 import { StateStore } from "./state-store.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { CodexAdapter } from "./codex-adapter.js";
-import { buildCompareUrl, createPullRequest } from "./github.js";
+import { buildCompareUrl, buildPullRequestFailureMessage, createPullRequest, getGitHubCliStatus } from "./github.js";
 import {
   type BranchReadiness,
   type FailureCategory,
@@ -40,13 +43,14 @@ import {
   type SessionState,
   type WorkItemState
 } from "./types.js";
-import { validatePlanResult } from "./validation.js";
+import { refinePlanResult, validatePlanResult } from "./validation.js";
 
 export interface JobManagerDependencies {
   planner: (task: string, repoRoot: string, baseBranch: string) => Promise<PlanResult>;
   executor: (options: {
     prompt: string;
     workspacePath: string;
+    branchName?: string;
     sessionId?: string;
     resumePrompt?: string;
   }) => Promise<ExecutionResult>;
@@ -62,6 +66,9 @@ export interface JobManagerDependencies {
     options?: { workItemIds?: string[]; baseBranch?: string; draft?: boolean }
   ) => Promise<PullRequestLink[]>;
   resolveMergeConflicts?: (job: JobState, options?: { sessionId?: string }) => Promise<MergeAutomationState>;
+  finalizeCompletedWorkItem?: (job: JobState, workItem: WorkItemState) => Promise<{ committed: boolean }>;
+  executionHeartbeatMs?: number;
+  staleRunningWarningMs?: number;
   resolveRepoContext: (
     repoPath: string,
     requestedBaseBranch?: string,
@@ -73,8 +80,38 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function isoToMillis(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+function formatDurationFromMilliseconds(durationMs: number): string {
+  const totalSeconds = Math.max(1, Math.floor(durationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts: string[] = [];
+
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+  if (minutes > 0 || hours > 0) {
+    parts.push(`${minutes}m`);
+  }
+  parts.push(`${seconds}s`);
+  return parts.join(" ");
+}
+
 function createJobId(): string {
   return `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function jobToken(jobId: string): string {
+  return jobId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "job";
 }
 
 function workItemFromPlan(item: PlannedWorkItem): WorkItemState {
@@ -245,6 +282,14 @@ function classifyFailure(message: string): {
   return { category: "execution-error", retryable: true, manualReviewRequired: true };
 }
 
+async function tryGetCurrentBranch(repoPath: string): Promise<string | undefined> {
+  try {
+    return await getCurrentBranch(repoPath);
+  } catch {
+    return undefined;
+  }
+}
+
 export async function createJobManager(projectRoot = process.cwd(), overrides?: Partial<JobManagerDependencies>): Promise<JobManager> {
   const config = overrides?.config ?? (await loadConfig(projectRoot));
   const store = overrides?.store ?? new StateStore(projectRoot, { stateDir: config.stateDir, logDir: config.logDir });
@@ -351,6 +396,26 @@ export async function createJobManager(projectRoot = process.cwd(), overrides?: 
         }
 
         return { repoRoot, baseBranch, dirtyWorkingTree };
+      }),
+    finalizeCompletedWorkItem:
+      overrides?.finalizeCompletedWorkItem ??
+      (async (_job, workItem) => {
+        if (!workItem.workspacePath) {
+          return { committed: false };
+        }
+
+        try {
+          await assertGitRepository(workItem.workspacePath);
+        } catch {
+          return { committed: false };
+        }
+
+        return {
+          committed: await commitAllChanges(
+            workItem.workspacePath,
+            `felixai: complete ${workItem.id} - ${workItem.title}`.slice(0, 72)
+          )
+        };
       })
   });
 }
@@ -398,7 +463,8 @@ export class JobManager {
     }
     await this.deps.store.saveJob(job);
 
-    const plan = validatePlanResult(await this.deps.planner(request.task, repoRoot, baseBranch));
+    const validatedPlan = validatePlanResult(await this.deps.planner(request.task, repoRoot, baseBranch));
+    const plan = validatePlanResult(refinePlanResult(validatedPlan));
     await this.deps.store.savePlan(job.jobId, {
       jobId: job.jobId,
       repoRoot,
@@ -410,6 +476,15 @@ export class JobManager {
     });
     if (plan.workItems.length === 0) {
       throw new Error("Planner returned no work items.");
+    }
+
+    if (plan.workItems.length !== validatedPlan.workItems.length) {
+      job = addEvent(
+        job,
+        "info",
+        "planner",
+        `FelixAI collapsed ${validatedPlan.workItems.length - plan.workItems.length} coupled verification work item(s) before execution.`
+      );
     }
 
     job = {
@@ -440,6 +515,14 @@ export class JobManager {
 
   async getJob(jobId: string): Promise<JobState> {
     return this.deps.store.loadJob(jobId);
+  }
+
+  private getExecutionHeartbeatMs(): number {
+    return this.deps.executionHeartbeatMs ?? 30_000;
+  }
+
+  private getStaleRunningWarningMs(): number {
+    return this.deps.staleRunningWarningMs ?? 120_000;
   }
 
   async listJobs(): Promise<JobState[]> {
@@ -626,11 +709,18 @@ export class JobManager {
         item.branchName &&
         (!options?.workItemIds || options.workItemIds.includes(item.id))
     );
-    if (selected.length === 0) {
+    const pushable: WorkItemState[] = [];
+    for (const item of selected) {
+      const changedFiles = await listChangedFiles(job.repoRoot, job.baseBranch, item.branchName as string).catch(() => []);
+      if (changedFiles.length > 0) {
+        pushable.push(item);
+      }
+    }
+    if (pushable.length === 0) {
       return this.getRemoteBranches(job);
     }
 
-    for (const item of selected) {
+    for (const item of pushable) {
       await pushBranch(job.repoRoot, item.branchName as string, remoteName);
     }
 
@@ -640,7 +730,7 @@ export class JobManager {
   private async runMergeAutomationDefault(job: JobState, options?: { workItemIds?: string[]; targetBranch?: string }): Promise<MergeAutomationState> {
     const targetBranch = options?.targetBranch ?? job.baseBranch;
     const mergeAutomation = createEmptyMergeAutomation(targetBranch);
-    mergeAutomation.mergeBranchName = `agent/merge/job-${job.jobId.slice(0, 8)}`;
+    mergeAutomation.mergeBranchName = `agent/merge/job-${jobToken(job.jobId)}`;
     mergeAutomation.workspacePath = path.join(path.resolve(job.repoPath), ".felixai", "merges", job.jobId);
     mergeAutomation.attemptedAt = now();
 
@@ -650,18 +740,25 @@ export class JobManager {
         item.branchName &&
         (!options?.workItemIds || options.workItemIds.includes(item.id))
     );
-    mergeAutomation.pendingBranches = selected.map((item) => item.branchName as string);
+    const mergeable: WorkItemState[] = [];
+    for (const item of selected) {
+      const changedFiles = await listChangedFiles(job.repoRoot, targetBranch, item.branchName as string).catch(() => []);
+      if (changedFiles.length > 0) {
+        mergeable.push(item);
+      }
+    }
+    mergeAutomation.pendingBranches = mergeable.map((item) => item.branchName as string);
 
-    if (selected.length === 0) {
+    if (mergeable.length === 0) {
       mergeAutomation.status = "failed";
-      mergeAutomation.error = "No completed branches are available to merge.";
+      mergeAutomation.error = "No completed branches with changes are available to merge.";
       mergeAutomation.completedAt = now();
       return mergeAutomation;
     }
 
     try {
       await createMergeWorktree(job.repoRoot, mergeAutomation.workspacePath, mergeAutomation.mergeBranchName, targetBranch);
-      for (const item of selected) {
+      for (const item of mergeable) {
         const branchName = item.branchName as string;
         try {
           await mergeBranchIntoCurrent(mergeAutomation.workspacePath, branchName);
@@ -675,7 +772,6 @@ export class JobManager {
           mergeAutomation.pendingBranches = mergeAutomation.pendingBranches.filter((entry) => entry !== branchName);
           mergeAutomation.status = "conflicted";
           mergeAutomation.error = error instanceof Error ? error.message : String(error);
-          await abortMerge(mergeAutomation.workspacePath).catch(() => undefined);
           mergeAutomation.completedAt = now();
           return mergeAutomation;
         }
@@ -708,6 +804,7 @@ export class JobManager {
 
     const links: PullRequestLink[] = [];
     for (const item of selected) {
+      const changedFiles = await listChangedFiles(job.repoRoot, targetBranch, item.branchName as string).catch(() => []);
       const issuePrefix = (item.issueRefs ?? []).map((issue) => `#${issue}`).join(" ");
       const title = `${item.title}${issuePrefix ? ` (${issuePrefix})` : ""}`;
       const bodyLines = [
@@ -724,7 +821,25 @@ export class JobManager {
       }
       const body = bodyLines.join("\n");
       const compareUrl = remoteUrl ? buildCompareUrl(remoteUrl, targetBranch, item.branchName as string) : undefined;
+
+      if (changedFiles.length === 0) {
+        links.push({
+          workItemId: item.id,
+          sourceBranch: item.branchName as string,
+          targetBranch,
+          issueRefs: item.issueRefs ?? [],
+          title,
+          body,
+          compareUrl,
+          error: "No changes relative to the target branch; skipping pull request creation.",
+          status: "not-created",
+          updatedAt: now()
+        });
+        continue;
+      }
+
       let created: { number?: number; url?: string; status: "draft" | "open" } | undefined;
+      let pullRequestError: string | undefined;
       try {
         created = await createPullRequest({
           repoPath: job.repoRoot,
@@ -734,7 +849,11 @@ export class JobManager {
           body,
           draft: options?.draft ?? true
         });
-      } catch {
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const ghAuthStatus = await getGitHubCliStatus(job.repoRoot);
+        pullRequestError = buildPullRequestFailureMessage(message, ghAuthStatus);
+        job = addEvent(job, "warn", "job", `Pull request creation failed for '${item.id}': ${message}`, item.id);
         created = undefined;
       }
 
@@ -748,6 +867,7 @@ export class JobManager {
         compareUrl,
         pullRequestNumber: created?.number,
         pullRequestUrl: created?.url,
+        error: pullRequestError,
         status: created?.status ?? "not-created",
         updatedAt: now()
       });
@@ -783,20 +903,31 @@ export class JobManager {
     });
 
     const remaining = await listConflictedFiles(current.workspacePath).catch(() => []);
+    const mergeInProgress = remaining.length === 0 ? await isMergeInProgress(current.workspacePath).catch(() => false) : true;
+
+    if (remaining.length === 0 && mergeInProgress) {
+      await continueMerge(current.workspacePath);
+    }
+
+    const mergeStillInProgress = await isMergeInProgress(current.workspacePath).catch(() => false);
+    const resolved = remaining.length === 0 && !mergeStillInProgress && result.status === "completed";
     return {
       ...current,
       resolutionSessionId: result.sessionId ?? current.resolutionSessionId,
       resolutionSummary: result.summary,
-      conflicts:
-        remaining.length === 0
-          ? []
-          : current.conflicts.map((entry) => ({
-              ...entry,
-              files: remaining
-            })),
-      status: remaining.length === 0 && result.status === "completed" ? "merged" : "conflicted",
-      completedAt: remaining.length === 0 ? now() : current.completedAt,
-      error: remaining.length === 0 ? undefined : current.error ?? "Conflicts remain after resolution attempt."
+      conflicts: resolved
+        ? []
+        : current.conflicts.map((entry) => ({
+            ...entry,
+            files: remaining
+          })),
+      status: resolved ? "merged" : "conflicted",
+      completedAt: resolved ? now() : current.completedAt,
+      error: resolved
+        ? undefined
+        : mergeStillInProgress
+          ? "Conflict resolution is staged, but the merge commit is still in progress."
+          : current.error ?? "Conflicts remain after resolution attempt."
     };
   }
 
@@ -881,12 +1012,40 @@ export class JobManager {
 
     while (true) {
       try {
-        const result = await this.deps.executor({
-          prompt: item.prompt,
-          workspacePath: workspace.workspacePath,
-          sessionId,
-          resumePrompt
-        });
+        const currentBranch = await tryGetCurrentBranch(workspace.workspacePath);
+        if (currentBranch && currentBranch !== workspace.branchName) {
+          await checkoutBranch(workspace.workspacePath, workspace.branchName);
+        }
+        let heartbeatWarned = false;
+        const heartbeat = setInterval(() => {
+          void this.persistRunningHeartbeat({
+            jobId,
+            workItemId: item.id,
+            workspacePath: workspace.workspacePath,
+            branchName: workspace.branchName,
+            sessionId,
+            attemptCount: updatedItem.attempts,
+            prompt: resumePrompt ?? item.prompt,
+            startedAt: updatedItem.startedAt,
+            heartbeatWarned: () => heartbeatWarned,
+            markWarned: () => {
+              heartbeatWarned = true;
+            }
+          });
+        }, this.getExecutionHeartbeatMs());
+
+        let result: ExecutionResult;
+        try {
+          result = await this.deps.executor({
+            prompt: item.prompt,
+            workspacePath: workspace.workspacePath,
+            branchName: workspace.branchName,
+            sessionId,
+            resumePrompt
+          });
+        } finally {
+          clearInterval(heartbeat);
+        }
 
         sessionId = result.sessionId ?? sessionId;
         updatedItem = {
@@ -896,8 +1055,17 @@ export class JobManager {
         };
 
         job = await this.deps.store.loadJob(jobId);
+        const activeBranch = await tryGetCurrentBranch(workspace.workspacePath);
+        if (activeBranch && activeBranch !== workspace.branchName) {
+          throw new Error(
+            `Workspace branch drift detected: expected '${workspace.branchName}' but Codex left the workspace on '${activeBranch}'.`
+          );
+        }
 
         if (result.status === "completed") {
+          const finalization = this.deps.finalizeCompletedWorkItem
+            ? await this.deps.finalizeCompletedWorkItem(job, updatedItem)
+            : { committed: false };
           updatedItem.status = "completed";
           updatedItem.completedAt = now();
           updatedItem.failureCategory = undefined;
@@ -905,6 +1073,9 @@ export class JobManager {
           updatedItem.manualReviewRequired = undefined;
           job = updateWorkItem(job, updatedItem);
           job = await this.refreshDerivedState(job);
+          if (finalization.committed) {
+            job = addEvent(job, "info", "session", "Committed workspace changes to the work-item branch.", item.id);
+          }
           job = addEvent(job, "info", "session", `Completed work item '${item.title}'.`, item.id);
           job = updateSession(job, {
             workItemId: item.id,
@@ -1031,6 +1202,59 @@ export class JobManager {
         await this.deps.store.saveJob(job);
         return job;
       }
+    }
+  }
+
+  private async persistRunningHeartbeat(options: {
+    jobId: string;
+    workItemId: string;
+    workspacePath: string;
+    branchName: string;
+    sessionId?: string;
+    attemptCount: number;
+    prompt: string;
+    startedAt?: string;
+    heartbeatWarned: () => boolean;
+    markWarned: () => void;
+  }): Promise<void> {
+    try {
+      let job = await this.deps.store.loadJob(options.jobId);
+      const item = job.workItems.find((entry) => entry.id === options.workItemId);
+      const session = job.sessions.find((entry) => entry.workItemId === options.workItemId);
+      if (!item || item.status !== "running" || !session || session.status !== "running") {
+        return;
+      }
+
+      const heartbeatTime = now();
+      job = updateSession(job, {
+        ...session,
+        sessionId: session.sessionId ?? options.sessionId,
+        workspacePath: session.workspacePath ?? options.workspacePath,
+        branchName: session.branchName ?? options.branchName,
+        attemptCount: options.attemptCount,
+        lastPrompt: options.prompt,
+        updatedAt: heartbeatTime
+      });
+
+      const startedAtMillis = isoToMillis(options.startedAt);
+      if (
+        startedAtMillis !== undefined &&
+        !options.heartbeatWarned() &&
+        Date.now() - startedAtMillis >= this.getStaleRunningWarningMs()
+      ) {
+        job = addEvent(
+          job,
+          "warn",
+          "session",
+          `Execution still running after ${formatDurationFromMilliseconds(Date.now() - startedAtMillis)}. Inspect the workspace if progress appears stalled.`,
+          options.workItemId
+        );
+        options.markWarned();
+      }
+
+      await this.deps.store.saveJob(job);
+    } catch {
+      // Best-effort heartbeat only; do not interfere with the active execution path.
     }
   }
 }

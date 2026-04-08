@@ -4,7 +4,9 @@ import path from "node:path";
 
 import { readJsonFile } from "./fs-utils.js";
 import packageJson from "../package.json" with { type: "json" };
+import { getCodexAuthStatus, loginWithCodex, logoutFromCodex } from "./auth.js";
 import { loadConfig } from "./config.js";
+import { runDoctor } from "./doctor.js";
 import { initializeProject } from "./init.js";
 import { createJobManager } from "./job-manager.js";
 import type { JobState } from "./types.js";
@@ -14,6 +16,10 @@ function printUsage(): void {
   console.log(`FelixAI Orchestrator
 
 Usage:
+  felixai auth login
+  felixai auth status
+  felixai auth logout
+  felixai doctor
   felixai init [--force]
   felixai config show
   felixai version
@@ -27,6 +33,9 @@ Usage:
   felixai job list [--json]
 
 Examples:
+  felixai auth login
+  felixai auth status
+  felixai doctor
   felixai init
   felixai config show
   felixai job start --repo . --task "Build the next milestone"
@@ -111,6 +120,36 @@ function summarizeJob(job: JobState): {
   );
 }
 
+function isBranchDriftError(message: string | undefined): boolean {
+  return typeof message === "string" && /branch drift detected/i.test(message);
+}
+
+function formatDuration(durationMs: number): string {
+  const totalSeconds = Math.max(1, Math.floor(durationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts: string[] = [];
+
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+  if (minutes > 0 || hours > 0) {
+    parts.push(`${minutes}m`);
+  }
+  parts.push(`${seconds}s`);
+  return parts.join(" ");
+}
+
+function parseIsoTimestamp(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -132,6 +171,53 @@ async function main(): Promise<void> {
       }
       for (const entry of result.skipped) {
         console.log(`[felixai] skipped existing ${entry}`);
+      }
+      return;
+    }
+    case "auth": {
+      const authCommand = rest[0];
+      switch (authCommand) {
+        case "login": {
+          await loginWithCodex();
+          const status = await getCodexAuthStatus();
+          console.log(`[felixai] Codex login active: ${status.loggedIn ? "yes" : "no"}`);
+          if (status.email) {
+            console.log(`[felixai] account: ${status.email}`);
+          }
+          return;
+        }
+        case "status": {
+          const status = await getCodexAuthStatus();
+          console.log(`[felixai] Codex login active: ${status.loggedIn ? "yes" : "no"}`);
+          if (status.email) {
+            console.log(`[felixai] account: ${status.email}`);
+          }
+          if (status.userId) {
+            console.log(`[felixai] user id: ${status.userId}`);
+          }
+          console.log(`[felixai] auth store: ${status.authFilePath}`);
+          if (status.rawStatus) {
+            console.log(`[felixai] codex status: ${status.rawStatus}`);
+          }
+          return;
+        }
+        case "logout": {
+          await logoutFromCodex();
+          console.log("[felixai] Codex login removed.");
+          return;
+        }
+        default:
+          throw new Error(`Unknown auth subcommand '${authCommand ?? ""}'. Use 'login', 'status', or 'logout'.`);
+      }
+    }
+    case "doctor": {
+      const report = await runDoctor(process.cwd());
+      console.log(`[felixai] doctor status: ${report.overallStatus}`);
+      for (const check of report.checks) {
+        console.log(`[felixai] ${check.id}: ${check.status} ${check.summary}`);
+        if (check.detail) {
+          console.log(`[felixai] ${check.id} detail: ${check.detail}`);
+        }
       }
       return;
     }
@@ -242,6 +328,9 @@ async function main(): Promise<void> {
               console.log(
                 `[felixai] pr ${pullRequest.workItemId}: status=${pullRequest.status} source=${pullRequest.sourceBranch} target=${pullRequest.targetBranch}`
               );
+              if (pullRequest.error) {
+                console.log(`[felixai] pr error: ${pullRequest.error}`);
+              }
             }
           }
           if (job.issueSummaries.length > 0) {
@@ -258,10 +347,53 @@ async function main(): Promise<void> {
               `branch=${item.branchName ?? "branch-pending"}`,
               `session=${session?.sessionId ?? item.sessionId ?? "session-pending"}`,
               `attempts=${item.attempts}`
-            ].join(" ");
+            ];
+            if (item.status === "running") {
+              const startedAt = parseIsoTimestamp(item.startedAt);
+              if (startedAt !== undefined) {
+                details.push(`running_for=${formatDuration(Date.now() - startedAt)}`);
+              }
+              const lastUpdate = parseIsoTimestamp(session?.updatedAt);
+              if (lastUpdate !== undefined) {
+                const sinceLastUpdate = Date.now() - lastUpdate;
+                details.push(`last_signal=${formatDuration(sinceLastUpdate)}_ago`);
+                details.push(`signal=${sinceLastUpdate >= 120_000 ? "stale" : "active"}`);
+              }
+            }
             const issueInfo = item.issueRefs && item.issueRefs.length > 0 ? ` issues=${item.issueRefs.join(",")}` : "";
             const failureInfo = item.failureCategory ? ` failure=${item.failureCategory} retryable=${item.retryable ? "yes" : "no"}` : "";
-            console.log(`[felixai] ${item.id}: ${item.status} ${details}${issueInfo}${failureInfo}`);
+            console.log(`[felixai] ${item.id}: ${item.status} ${details.join(" ")}${issueInfo}${failureInfo}`);
+          }
+          const branchDriftItems = job.workItems.filter((item) => item.status === "failed" && isBranchDriftError(item.error));
+          if (branchDriftItems.length > 0) {
+            console.log("[felixai] action required: branch drift detected");
+            for (const item of branchDriftItems) {
+              console.log(
+                `[felixai] branch drift ${item.id}: expected=${item.branchName ?? "unknown"} workspace=${item.workspacePath ?? "unknown"}`
+              );
+              console.log(`[felixai] branch drift detail: ${item.error}`);
+            }
+          }
+          const staleRunningItems = job.workItems
+            .map((item) => ({
+              item,
+              session: job.sessions.find((entry) => entry.workItemId === item.id)
+            }))
+            .filter(({ item, session }) => {
+              if (item.status !== "running") {
+                return false;
+              }
+              const updatedAt = parseIsoTimestamp(session?.updatedAt);
+              return updatedAt !== undefined && Date.now() - updatedAt >= 120_000;
+            });
+          if (staleRunningItems.length > 0) {
+            console.log("[felixai] action required: running work item may be stalled");
+            for (const { item, session } of staleRunningItems) {
+              const updatedAt = parseIsoTimestamp(session?.updatedAt) ?? Date.now();
+              console.log(
+                `[felixai] running ${item.id}: workspace=${item.workspacePath ?? "unknown"} last_signal=${formatDuration(Date.now() - updatedAt)}_ago`
+              );
+            }
           }
           const recentEvents = job.events.slice(-5);
           if (recentEvents.length > 0) {
@@ -339,6 +471,9 @@ async function main(): Promise<void> {
             console.log(
               `[felixai] pr ${pullRequest.workItemId}: status=${pullRequest.status} source=${pullRequest.sourceBranch} target=${pullRequest.targetBranch}`
             );
+            if (pullRequest.error) {
+              console.log(`[felixai] pr error: ${pullRequest.error}`);
+            }
             if (pullRequest.pullRequestUrl) {
               console.log(`[felixai] pr url: ${pullRequest.pullRequestUrl}`);
             } else if (pullRequest.compareUrl) {
@@ -396,11 +531,15 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`[felixai] ${message}`);
-  process.exitCode = 1;
-});
+main()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[felixai] ${message}`);
+    process.exit(1);
+  });
 
 async function resolveTaskInput(args: string[]): Promise<string> {
   const inlineTask = getFlagValue(args, "--task");
