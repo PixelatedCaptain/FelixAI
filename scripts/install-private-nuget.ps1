@@ -20,6 +20,54 @@ $projectRoot = Split-Path -Parent $scriptDir
 $toolProject = Join-Path $projectRoot "packaging\FelixAI.Tool\FelixAI.Tool.csproj"
 $packageId = "FelixAI.Tool"
 
+function Get-InstalledToolPayloadPath {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$InstallRoot,
+
+    [Parameter(Mandatory = $true)]
+    [string]$PackageVersion
+  )
+
+  $candidate = Join-Path $InstallRoot ".store\felixai.tool\$PackageVersion\felixai.tool\$PackageVersion\tools\net8.0\any"
+  if (Test-Path $candidate) {
+    return (Resolve-Path $candidate).Path
+  }
+
+  return $null
+}
+
+function Assert-InstalledToolRuntimeFiles {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$InstallRoot,
+
+    [Parameter(Mandatory = $true)]
+    [string]$PackageVersion
+  )
+
+  $payloadPath = Get-InstalledToolPayloadPath -InstallRoot $InstallRoot -PackageVersion $PackageVersion
+  if ([string]::IsNullOrWhiteSpace($payloadPath)) {
+    throw "Installed tool payload path was not found under '$InstallRoot'."
+  }
+
+  $requiredFiles = @(
+    "FelixAI.Tool.runtimeconfig.json",
+    "FelixAI.Tool.deps.json",
+    "FelixAI.Tool.dll",
+    "dist\cli.js"
+  )
+
+  foreach ($relativePath in $requiredFiles) {
+    $target = Join-Path $payloadPath $relativePath
+    if (-not (Test-Path $target)) {
+      throw "Installed tool is missing required runtime file '$relativePath' under '$payloadPath'."
+    }
+  }
+
+  Write-Host "[felixai] verified installed tool payload: $payloadPath"
+}
+
 if ([string]::IsNullOrWhiteSpace($FeedUrl)) {
   throw "Feed URL is required. Pass -FeedUrl or set FELIXAI_NUGET_FEED_URL."
 }
@@ -61,6 +109,10 @@ if ($SkipVerify.IsPresent) {
 }
 
 $felixExecutable = if ($Global.IsPresent) { "felixai" } else { Join-Path $ToolPath "felixai.exe" }
+
+if (-not $Global.IsPresent) {
+  Assert-InstalledToolRuntimeFiles -InstallRoot $ToolPath -PackageVersion $Version
+}
 
 Write-Host "[felixai] verifying install with: $felixExecutable version"
 & $felixExecutable version | Out-Host
