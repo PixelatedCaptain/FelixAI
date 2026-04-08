@@ -9,7 +9,19 @@ Requirements:
 - Node.js 18+ available on `PATH`, or `FELIXAI_NODE_EXE` set explicitly
 - Local Codex authentication already available on the machine
 
-Install from a private feed:
+Recommended install flow for GitHub Packages under `PixelatedCaptain`:
+
+```powershell
+dotnet nuget add source "https://nuget.pkg.github.com/PixelatedCaptain/index.json" `
+  --name "felixai-github" `
+  --username "<github-username>" `
+  --password "<classic-pat-with-read-packages>" `
+  --store-password-in-clear-text
+
+dotnet tool install --global FelixAI.Tool --add-source "felixai-github"
+```
+
+Optional helper-script install from a private feed:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
@@ -25,7 +37,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-fr
   -Global
 ```
 
-For GitHub Packages under `PixelatedCaptain`:
+Optional GitHub Packages helper-script install:
 
 ```powershell
 $env:FELIXAI_GITHUB_PACKAGES_OWNER = "PixelatedCaptain"

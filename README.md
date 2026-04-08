@@ -70,7 +70,7 @@ $env:FELIXAI_NUGET_FEED_URL = "<feed-url>"
 npm run install:nuget -- --global
 ```
 
-For a teammate-friendly install bootstrap from a private feed:
+Optional helper for a teammate-friendly install bootstrap from a private feed:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
@@ -108,7 +108,34 @@ Requirements on the target machine:
 - .NET tool support
 - Node.js 18+ on `PATH`
 
-Install from your private feed:
+Recommended install flow for teammates:
+
+1. Add the NuGet source once on the machine.
+2. Install or update FelixAI with `dotnet tool`.
+
+For GitHub Packages under `PixelatedCaptain`, add the source once:
+
+```powershell
+dotnet nuget add source "https://nuget.pkg.github.com/PixelatedCaptain/index.json" `
+  --name "felixai-github" `
+  --username "<github-username>" `
+  --password "<classic-pat-with-read-packages>" `
+  --store-password-in-clear-text
+```
+
+Then install FelixAI:
+
+```powershell
+dotnet tool install --global FelixAI.Tool --add-source "felixai-github"
+```
+
+Update FelixAI later with:
+
+```powershell
+dotnet tool update --global FelixAI.Tool --add-source "felixai-github"
+```
+
+Optional helper-script install from your private feed:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
@@ -116,7 +143,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-fr
   -Global
 ```
 
-Or install from a downloaded package:
+Optional helper-script install from a downloaded package:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
@@ -134,7 +161,7 @@ For a GitHub-hosted private NuGet feed under `PixelatedCaptain`, the feed URL is
 https://nuget.pkg.github.com/PixelatedCaptain/index.json
 ```
 
-Install from GitHub Packages:
+Install from GitHub Packages with the helper script:
 
 ```powershell
 $env:FELIXAI_GITHUB_PACKAGES_OWNER = "PixelatedCaptain"

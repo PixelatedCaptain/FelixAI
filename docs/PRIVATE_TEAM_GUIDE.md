@@ -12,7 +12,31 @@ This guide is for a small private team using FelixAI through the private NuGet p
 
 ## Install and Update
 
-Install FelixAI from the private feed:
+Recommended setup for GitHub Packages under `PixelatedCaptain`:
+
+1. Add the NuGet source once on the machine:
+
+```powershell
+dotnet nuget add source "https://nuget.pkg.github.com/PixelatedCaptain/index.json" `
+  --name "felixai-github" `
+  --username "<github-username>" `
+  --password "<classic-pat-with-read-packages>" `
+  --store-password-in-clear-text
+```
+
+2. Install FelixAI:
+
+```powershell
+dotnet tool install --global FelixAI.Tool --add-source "felixai-github"
+```
+
+3. Update FelixAI later with:
+
+```powershell
+dotnet tool update --global FelixAI.Tool --add-source "felixai-github"
+```
+
+Optional helper-script install from a private feed:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
@@ -20,7 +44,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-fr
   -Global
 ```
 
-Update FelixAI from the same feed:
+Optional helper-script update from the same feed:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
@@ -28,7 +52,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-fr
   -Global
 ```
 
-If you distribute the `.nupkg` directly instead of using the feed:
+If you distribute the `.nupkg` directly instead of using the feed, use:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
@@ -42,14 +66,14 @@ Verify the install:
 felixai version
 ```
 
-If the feed requires credentials, set these first:
+If you are using a generic private feed instead of GitHub Packages, set these first:
 
 ```powershell
 $env:FELIXAI_NUGET_USERNAME = "<username>"
 $env:FELIXAI_NUGET_TOKEN = "<token>"
 ```
 
-For GitHub Packages under `PixelatedCaptain`:
+Optional GitHub Packages helper-script install:
 
 ```powershell
 $env:FELIXAI_GITHUB_PACKAGES_OWNER = "PixelatedCaptain"
@@ -60,7 +84,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-fr
   -Global
 ```
 
-Publishing uses a PAT with `write:packages`:
+Publishing to GitHub Packages uses a PAT with `write:packages`:
 
 ```powershell
 $env:FELIXAI_GITHUB_PACKAGES_OWNER = "PixelatedCaptain"
