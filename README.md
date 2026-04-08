@@ -70,6 +70,24 @@ $env:FELIXAI_NUGET_FEED_URL = "<feed-url>"
 npm run install:nuget -- --global
 ```
 
+For a teammate-friendly install bootstrap from a private feed:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
+  -FeedUrl "<feed-url>" `
+  -Global
+```
+
+If the feed requires credentials, set `FELIXAI_NUGET_USERNAME` and `FELIXAI_NUGET_TOKEN` first or pass `-Username` and `-Token`.
+
+For a downloaded package install:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
+  -PackagePath .\FelixAI.Tool.0.1.0.nupkg `
+  -Global
+```
+
 ## Private NuGet Install
 
 FelixAI can be distributed through a private NuGet feed as a .NET tool wrapper around the bundled Node CLI.
@@ -82,8 +100,17 @@ Requirements on the target machine:
 Install from your private feed:
 
 ```powershell
-dotnet tool install --global FelixAI.Tool --add-source <your-feed>
-felixai version
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
+  -FeedUrl <your-feed> `
+  -Global
+```
+
+Or install from a downloaded package:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
+  -PackagePath .\FelixAI.Tool.0.1.0.nupkg `
+  -Global
 ```
 
 If Node is installed in a non-standard location, set `FELIXAI_NODE_EXE` before running `felixai`.

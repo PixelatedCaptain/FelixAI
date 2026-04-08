@@ -8,17 +8,21 @@ param(
   [switch]$Global,
 
   [Parameter(Mandatory = $false)]
-  [string]$ToolPath = (Join-Path (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)) "tmp\tool-install-private"),
+  [string]$ToolPath,
 
   [switch]$SkipVerify
 )
 
 $ErrorActionPreference = "Stop"
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$scriptDir = $PSScriptRoot
 $projectRoot = Split-Path -Parent $scriptDir
 $toolProject = Join-Path $projectRoot "packaging\FelixAI.Tool\FelixAI.Tool.csproj"
 $packageId = "FelixAI.Tool"
+
+if ([string]::IsNullOrWhiteSpace($ToolPath) -and -not $Global.IsPresent) {
+  $ToolPath = Join-Path $projectRoot "tmp\tool-install-private"
+}
 
 function Get-InstalledToolPayloadPath {
   param(
@@ -55,7 +59,11 @@ function Assert-InstalledToolRuntimeFiles {
     "FelixAI.Tool.runtimeconfig.json",
     "FelixAI.Tool.deps.json",
     "FelixAI.Tool.dll",
-    "dist\cli.js"
+    "dist\cli.js",
+    "node_modules\@openai\codex-sdk\package.json",
+    "node_modules\@openai\codex\package.json",
+    "node_modules\@openai\codex-win32-x64\package.json",
+    "node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex\codex.exe"
   )
 
   foreach ($relativePath in $requiredFiles) {

@@ -15,19 +15,38 @@ This guide is for a small private team using FelixAI through the private NuGet p
 Install FelixAI from the private feed:
 
 ```powershell
-dotnet tool install --global FelixAI.Tool --add-source <feed-url>
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
+  -FeedUrl <feed-url> `
+  -Global
 ```
 
 Update FelixAI from the same feed:
 
 ```powershell
-dotnet tool update --global FelixAI.Tool --add-source <feed-url>
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
+  -FeedUrl <feed-url> `
+  -Global
+```
+
+If you distribute the `.nupkg` directly instead of using the feed:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
+  -PackagePath .\FelixAI.Tool.0.1.0.nupkg `
+  -Global
 ```
 
 Verify the install:
 
 ```powershell
 felixai version
+```
+
+If the feed requires credentials, set these first:
+
+```powershell
+$env:FELIXAI_NUGET_USERNAME = "<username>"
+$env:FELIXAI_NUGET_TOKEN = "<token>"
 ```
 
 ## Auth

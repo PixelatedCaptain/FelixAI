@@ -12,14 +12,17 @@ Requirements:
 Install from a private feed:
 
 ```powershell
-dotnet tool install --global FelixAI.Tool --add-source <feed-url>
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
+  -FeedUrl <feed-url> `
+  -Global
 ```
 
-Or from the FelixAI repo with the helper script:
+Or from a downloaded package:
 
 ```powershell
-$env:FELIXAI_NUGET_FEED_URL = "<feed-url>"
-npm run install:nuget -- --global
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
+  -PackagePath .\FelixAI.Tool.0.1.0.nupkg `
+  -Global
 ```
 
 Run:
