@@ -24,9 +24,11 @@
     "release:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/create-release-zip.ps1",
     "pack:nuget": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/pack-nuget-tool.ps1",
     "publish:nuget": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/publish-private-nuget.ps1",
+    "publish:github": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/publish-github-packages.ps1",
     "install:nuget": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-private-nuget.ps1",
     "install:feed": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-felixai-from-feed.ps1",
-    "install:package": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-felixai-from-package.ps1"
+    "install:package": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-felixai-from-package.ps1",
+    "install:github": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-felixai-from-github-packages.ps1"
   },
   "keywords": [
     "codex",

@@ -80,6 +80,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-fr
 
 If the feed requires credentials, set `FELIXAI_NUGET_USERNAME` and `FELIXAI_NUGET_TOKEN` first or pass `-Username` and `-Token`.
 
+For GitHub Packages under `PixelatedCaptain`:
+
+```powershell
+$env:FELIXAI_GITHUB_PACKAGES_OWNER = "PixelatedCaptain"
+$env:FELIXAI_GITHUB_PACKAGES_USERNAME = "<github-username>"
+$env:FELIXAI_GITHUB_PACKAGES_TOKEN = "<classic-pat>"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-github-packages.ps1 `
+  -Global
+```
+
 For a downloaded package install:
 
 ```powershell
@@ -114,6 +125,35 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-fr
 ```
 
 If Node is installed in a non-standard location, set `FELIXAI_NODE_EXE` before running `felixai`.
+
+## GitHub Packages
+
+For a GitHub-hosted private NuGet feed under `PixelatedCaptain`, the feed URL is:
+
+```text
+https://nuget.pkg.github.com/PixelatedCaptain/index.json
+```
+
+Install from GitHub Packages:
+
+```powershell
+$env:FELIXAI_GITHUB_PACKAGES_OWNER = "PixelatedCaptain"
+$env:FELIXAI_GITHUB_PACKAGES_USERNAME = "<github-username>"
+$env:FELIXAI_GITHUB_PACKAGES_TOKEN = "<classic-pat-with-read-packages>"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-github-packages.ps1 `
+  -Global
+```
+
+Publish to GitHub Packages:
+
+```powershell
+$env:FELIXAI_GITHUB_PACKAGES_OWNER = "PixelatedCaptain"
+$env:FELIXAI_GITHUB_PACKAGES_TOKEN = "<classic-pat-with-write-packages>"
+npm run publish:github
+```
+
+GitHub's NuGet registry uses personal access tokens (classic). Private installs need `read:packages`; publishing needs `write:packages`. If the package is associated with a private repository, the account also needs repository access.
 
 ## Bootstrap
 

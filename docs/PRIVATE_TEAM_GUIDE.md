@@ -49,6 +49,25 @@ $env:FELIXAI_NUGET_USERNAME = "<username>"
 $env:FELIXAI_NUGET_TOKEN = "<token>"
 ```
 
+For GitHub Packages under `PixelatedCaptain`:
+
+```powershell
+$env:FELIXAI_GITHUB_PACKAGES_OWNER = "PixelatedCaptain"
+$env:FELIXAI_GITHUB_PACKAGES_USERNAME = "<github-username>"
+$env:FELIXAI_GITHUB_PACKAGES_TOKEN = "<classic-pat-with-read-packages>"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-github-packages.ps1 `
+  -Global
+```
+
+Publishing uses a PAT with `write:packages`:
+
+```powershell
+$env:FELIXAI_GITHUB_PACKAGES_OWNER = "PixelatedCaptain"
+$env:FELIXAI_GITHUB_PACKAGES_TOKEN = "<classic-pat-with-write-packages>"
+npm run publish:github
+```
+
 ## Auth
 
 FelixAI uses the local Codex session. It does not manage a separate team login.

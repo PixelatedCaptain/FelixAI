@@ -25,6 +25,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-fr
   -Global
 ```
 
+For GitHub Packages under `PixelatedCaptain`:
+
+```powershell
+$env:FELIXAI_GITHUB_PACKAGES_OWNER = "PixelatedCaptain"
+$env:FELIXAI_GITHUB_PACKAGES_USERNAME = "<github-username>"
+$env:FELIXAI_GITHUB_PACKAGES_TOKEN = "<classic-pat-with-read-packages>"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-github-packages.ps1 `
+  -Global
+```
+
 Run:
 
 ```powershell
