@@ -28,6 +28,7 @@ import { StateStore } from "./state-store.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { buildCompareUrl, buildPullRequestFailureMessage, createPullRequest, getGitHubCliStatus } from "./github.js";
+import { loadRepoAgentsPreferences } from "./repo-agents.js";
 import {
   type BranchReadiness,
   type FailureCategory,
@@ -47,15 +48,23 @@ import {
   type WorkItemState
 } from "./types.js";
 import { refinePlanResult, validatePlanResult } from "./validation.js";
+import type { ModelReasoningEffort } from "@openai/codex-sdk";
 
 export interface JobManagerDependencies {
-  planner: (task: string, repoRoot: string, baseBranch: string) => Promise<PlanResult>;
+  planner: (
+    task: string,
+    repoRoot: string,
+    baseBranch: string,
+    runtimePreferences?: { model?: string; modelReasoningEffort?: ModelReasoningEffort }
+  ) => Promise<PlanResult>;
   executor: (options: {
     prompt: string;
     workspacePath: string;
     branchName?: string;
     sessionId?: string;
     resumePrompt?: string;
+    model?: string;
+    modelReasoningEffort?: ModelReasoningEffort;
   }) => Promise<ExecutionResult>;
   workspaceManager: Pick<WorkspaceManager, "ensureWorkspace">;
   store: StateStore;
@@ -182,25 +191,10 @@ function createJobId(): string {
   return `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-async function loadRepoInstructions(repoRoot: string): Promise<{ path: string; content: string } | undefined> {
-  const instructionsPath = path.join(repoRoot, "AGENTS.md");
-  try {
-    const content = await readFile(instructionsPath, "utf8");
-    const trimmed = content.trim();
-    if (!trimmed) {
-      return undefined;
-    }
-
-    return {
-      path: instructionsPath,
-      content: trimmed
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function buildInstructionAwareTask(task: string, repoInstructions: { path: string; content: string } | undefined): string {
+function buildInstructionAwareTask(
+  task: string,
+  repoInstructions: { path: string; content: string } | undefined
+): string {
   if (!repoInstructions) {
     return task;
   }
@@ -416,7 +410,9 @@ export async function createJobManager(projectRoot = process.cwd(), overrides?: 
   const adapter = new CodexAdapter(config);
 
   return new JobManager({
-    planner: overrides?.planner ?? ((task, repoRoot, baseBranch) => adapter.createPlan(task, repoRoot, baseBranch)),
+    planner:
+      overrides?.planner ??
+      ((task, repoRoot, baseBranch, runtimePreferences) => adapter.createPlan(task, repoRoot, baseBranch, runtimePreferences)),
     executor: overrides?.executor ?? ((options) => adapter.executeWorkItem(options)),
     workspaceManager,
     store,
@@ -579,13 +575,18 @@ export class JobManager {
     if (dirtyWorkingTree) {
       job = addEvent(job, "warn", "job", "Repository has uncommitted changes; proceeding because dirty working trees are allowed.");
     }
-    const repoInstructions = await loadRepoInstructions(repoRoot);
+    const repoInstructions = await loadRepoAgentsPreferences(repoRoot);
     if (repoInstructions) {
       job = addEvent(job, "info", "job", `Loaded repository instructions from ${repoInstructions.path}.`);
     }
     await this.deps.store.saveJob(job);
 
-    const validatedPlan = validatePlanResult(await this.deps.planner(buildInstructionAwareTask(request.task, repoInstructions), repoRoot, baseBranch));
+    const validatedPlan = validatePlanResult(
+      await this.deps.planner(buildInstructionAwareTask(request.task, repoInstructions), repoRoot, baseBranch, {
+        model: repoInstructions?.model,
+        modelReasoningEffort: repoInstructions?.reasoningEffort
+      })
+    );
     const plan = validatePlanResult(refinePlanResult(validatedPlan));
     await this.deps.store.savePlan(job.jobId, {
       jobId: job.jobId,
@@ -1051,7 +1052,7 @@ export class JobManager {
 
   private async executeSingleItem(jobId: string, workItemId: string): Promise<JobState> {
     let job = await this.deps.store.loadJob(jobId);
-    const repoInstructions = await loadRepoInstructions(job.repoRoot);
+    const repoInstructions = await loadRepoAgentsPreferences(job.repoRoot);
     const item = job.workItems.find((entry) => entry.id === workItemId);
     if (!item) {
       throw new Error(`Unknown work item '${workItemId}'.`);
@@ -1160,7 +1161,9 @@ export class JobManager {
             workspacePath: workspace.workspacePath,
             branchName: workspace.branchName,
             sessionId,
-            resumePrompt
+            resumePrompt,
+            model: repoInstructions?.model,
+            modelReasoningEffort: repoInstructions?.reasoningEffort
           });
         } finally {
           clearInterval(heartbeat);

@@ -1,16 +1,20 @@
 #!/usr/bin/env node
 
 import path from "node:path";
+import readline from "node:readline/promises";
 
 import { readJsonFile } from "./fs-utils.js";
 import packageJson from "../package.json" with { type: "json" };
 import { getCodexAuthStatus, loginWithCodex, logoutFromCodex } from "./auth.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, saveConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
+import { assertGitRepository, resolveGitRoot } from "./git.js";
 import { initializeProject } from "./init.js";
 import { createJobManager } from "./job-manager.js";
+import { loadRepoAgentsPreferences, saveRepoAgentsPreferences } from "./repo-agents.js";
 import type { JobState } from "./types.js";
 import { readTaskFromJson } from "./validation.js";
+import type { ModelReasoningEffort } from "@openai/codex-sdk";
 
 function printUsage(): void {
   console.log(`FelixAI Orchestrator
@@ -22,6 +26,8 @@ Usage:
   felixai doctor
   felixai init [--force]
   felixai config show
+  felixai config set reasoning-effort <minimal|low|medium|high|xhigh> [--repo <path>]
+  felixai config set model <model-name> [--repo <path>]
   felixai version
   felixai job start --repo <path> (--task "<large task>" | --task-file <file>) [--base-branch <branch>] [--parallel <n>] [--auto-resume] [--require-clean] [--issue <id>]
   felixai job status <job-id> [--json]
@@ -38,6 +44,8 @@ Examples:
   felixai doctor
   felixai init
   felixai config show
+  felixai config set reasoning-effort medium
+  felixai config set model gpt-5.4 --repo .
   felixai job start --repo . --task "Build the next milestone"
   felixai job start --repo . --task-file ./felixai.task.json --parallel 3 --auto-resume
   felixai job start --repo . --task "Refactor auth" --require-clean
@@ -159,6 +167,67 @@ function findRepoInstructionsPath(job: JobState): string | undefined {
   return event.message.replace(/^.*Loaded repository instructions from /i, "").replace(/\.$/, "");
 }
 
+function isReasoningEffort(value: string): value is ModelReasoningEffort {
+  return ["minimal", "low", "medium", "high", "xhigh"].includes(value);
+}
+
+async function resolveRepoRoot(repoPath: string): Promise<string> {
+  await assertGitRepository(repoPath);
+  return resolveGitRoot(repoPath);
+}
+
+async function prompt(question: string): Promise<string> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  try {
+    return (await rl.question(question)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+async function ensureRepoModelPreference(repoPath: string): Promise<void> {
+  const repoRoot = await resolveRepoRoot(repoPath);
+  const preferences = await loadRepoAgentsPreferences(repoRoot);
+  if (preferences?.model) {
+    return;
+  }
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error(
+      `Repository '${repoRoot}' does not define a FelixAI model in AGENTS.md. Run 'felixai config set model <model> --repo "${repoRoot}"' first.`
+    );
+  }
+
+  let model = "";
+  while (!model) {
+    model = await prompt(`[felixai] Enter the Codex model for ${repoRoot}: `);
+  }
+
+  const saved = await saveRepoAgentsPreferences(repoRoot, { model });
+  console.log(`[felixai] saved repo model: ${saved.model}`);
+  console.log(`[felixai] repo instructions: ${saved.path}`);
+}
+
+async function printRepoPreferences(repoRoot: string, options?: { includePath?: boolean }): Promise<void> {
+  const preferences = await loadRepoAgentsPreferences(repoRoot);
+  if (!preferences) {
+    return;
+  }
+
+  if (options?.includePath ?? true) {
+    console.log(`[felixai] repo instructions: ${preferences.path}`);
+  }
+  if (preferences.model) {
+    console.log(`[felixai] repo model: ${preferences.model}`);
+  }
+  if (preferences.reasoningEffort) {
+    console.log(`[felixai] repo reasoning effort: ${preferences.reasoningEffort}`);
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -232,20 +301,65 @@ async function main(): Promise<void> {
     }
     case "config": {
       const configCommand = rest[0];
-      if (configCommand !== "show") {
-        throw new Error(`Unknown config subcommand '${configCommand ?? ""}'. Use 'show'.`);
+      if (configCommand === "show") {
+        const config = await loadConfig();
+        console.log(`[felixai] credential source: ${config.credentialSource}`);
+        console.log(`[felixai] state dir: ${config.stateDir}`);
+        console.log(`[felixai] workspace root: ${config.workspaceRoot}`);
+        console.log(`[felixai] log dir: ${config.logDir}`);
+        console.log(`[felixai] sandbox mode: ${config.codex.sandboxMode}`);
+        console.log(`[felixai] approval policy: ${config.codex.approvalPolicy}`);
+        console.log(`[felixai] reasoning effort default: ${config.codex.modelReasoningEffort}`);
+        console.log("[felixai] model default: prompt per repo until AGENTS.md sets model");
+        console.log(`[felixai] parallelism: ${config.codex.parallelism}`);
+        console.log(`[felixai] auto resume: ${config.codex.autoResume}`);
+
+        try {
+          const repoRoot = await resolveRepoRoot(process.cwd());
+          await printRepoPreferences(repoRoot);
+        } catch {
+          // Config show should still work outside a git repository.
+        }
+        return;
       }
 
-      const config = await loadConfig();
-      console.log(`[felixai] credential source: ${config.credentialSource}`);
-      console.log(`[felixai] state dir: ${config.stateDir}`);
-      console.log(`[felixai] workspace root: ${config.workspaceRoot}`);
-      console.log(`[felixai] log dir: ${config.logDir}`);
-      console.log(`[felixai] sandbox mode: ${config.codex.sandboxMode}`);
-      console.log(`[felixai] approval policy: ${config.codex.approvalPolicy}`);
-      console.log(`[felixai] parallelism: ${config.codex.parallelism}`);
-      console.log(`[felixai] auto resume: ${config.codex.autoResume}`);
-      return;
+      if (configCommand === "set") {
+        const settingName = requireValue(rest[1], "Missing config setting name.");
+        const settingValue = requireValue(rest[2], "Missing config setting value.");
+        const repoFlagValue = getFlagValue(rest.slice(3), "--repo");
+
+        if (settingName === "reasoning-effort") {
+          if (!isReasoningEffort(settingValue)) {
+            throw new Error(`Invalid reasoning effort '${settingValue}'. Use minimal, low, medium, high, or xhigh.`);
+          }
+
+          if (repoFlagValue) {
+            const repoRoot = await resolveRepoRoot(path.resolve(repoFlagValue));
+            const saved = await saveRepoAgentsPreferences(repoRoot, { reasoningEffort: settingValue });
+            console.log(`[felixai] repo reasoning effort: ${saved.reasoningEffort}`);
+            console.log(`[felixai] repo instructions: ${saved.path}`);
+            return;
+          }
+
+          const config = await loadConfig();
+          config.codex.modelReasoningEffort = settingValue;
+          await saveConfig(config);
+          console.log(`[felixai] default reasoning effort: ${config.codex.modelReasoningEffort}`);
+          return;
+        }
+
+        if (settingName === "model") {
+          const repoRoot = await resolveRepoRoot(path.resolve(repoFlagValue ?? process.cwd()));
+          const saved = await saveRepoAgentsPreferences(repoRoot, { model: settingValue });
+          console.log(`[felixai] repo model: ${saved.model}`);
+          console.log(`[felixai] repo instructions: ${saved.path}`);
+          return;
+        }
+
+        throw new Error(`Unknown config setting '${settingName}'. Use 'reasoning-effort' or 'model'.`);
+      }
+
+      throw new Error(`Unknown config subcommand '${configCommand ?? ""}'. Use 'show' or 'set'.`);
     }
     case "version": {
       console.log(`[felixai] version: ${packageJson.version}`);
@@ -261,6 +375,7 @@ async function main(): Promise<void> {
       switch (jobCommand) {
         case "start": {
           const repoPath = path.resolve(requireValue(getFlagValue(jobArgs, "--repo"), "Missing --repo value."));
+          await ensureRepoModelPreference(repoPath);
           const task = await resolveTaskInput(jobArgs);
           const baseBranch = getFlagValue(jobArgs, "--base-branch");
           const parallelism = parseInteger(getFlagValue(jobArgs, "--parallel"));
@@ -281,6 +396,7 @@ async function main(): Promise<void> {
           const repoInstructionsPath = findRepoInstructionsPath(job);
           if (repoInstructionsPath) {
             console.log(`[felixai] repo instructions: ${repoInstructionsPath}`);
+            await printRepoPreferences(job.repoRoot, { includePath: false });
           }
           if (job.issueRefs.length > 0) {
             console.log(`[felixai] issue refs: ${job.issueRefs.join(", ")}`);
@@ -307,6 +423,7 @@ async function main(): Promise<void> {
           const repoInstructionsPath = findRepoInstructionsPath(job);
           if (repoInstructionsPath) {
             console.log(`[felixai] repo instructions: ${repoInstructionsPath}`);
+            await printRepoPreferences(job.repoRoot, { includePath: false });
           }
           console.log(
             `[felixai] work items: pending=${summary.pending} running=${summary.running} boundary=${summary.boundary} blocked=${summary.blocked} completed=${summary.completed} failed=${summary.failed}`

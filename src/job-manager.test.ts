@@ -14,6 +14,7 @@ import { buildPullRequestFailureMessage, createPullRequestWithRunner, hasGitHubT
 import { initializeProject } from "./init.js";
 import { createJobManager, JobManager } from "./job-manager.js";
 import { runCommand } from "./process-utils.js";
+import { loadRepoAgentsPreferences, saveRepoAgentsPreferences } from "./repo-agents.js";
 import { StateStore } from "./state-store.js";
 import { refinePlanResult } from "./validation.js";
 import { WorkspaceManager } from "./workspace-manager.js";
@@ -49,6 +50,10 @@ async function testInit(): Promise<void> {
   assert.ok(result.created.some((entry) => entry.endsWith(path.join(".felixai", "config.json"))));
   assert.ok(await pathExists(path.join(root, ".felixai", "state", "jobs")));
   assert.ok(await pathExists(path.join(root, ".felixai", "workspaces")));
+}
+
+async function testDefaultReasoningEffortIsMedium(): Promise<void> {
+  assert.equal(DEFAULT_CONFIG.codex.modelReasoningEffort, "medium");
 }
 
 async function testInvalidConfigFailsValidation(): Promise<void> {
@@ -212,10 +217,16 @@ async function testPlannerAndExecutionFlow(): Promise<void> {
 async function testStartJobLoadsRepoAgentsInstructionsAndPassesThemToPlannerAndExecutor(): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "felix-agents-"));
   await ensureFelixDirectories(root);
-  await writeFile(path.join(root, "AGENTS.md"), "Use snake_case helpers and keep tests updated.\n", "utf8");
+  await writeFile(
+    path.join(root, "AGENTS.md"),
+    ["model: gpt-5.4", "reasoning_effort: high", "", "Use snake_case helpers and keep tests updated."].join("\n"),
+    "utf8"
+  );
 
   let plannerInstructions: string | undefined;
   let executorInstructions: string | undefined;
+  let plannerPreferences: { model?: string; modelReasoningEffort?: string } | undefined;
+  let executorPreferences: { model?: string; modelReasoningEffort?: string } | undefined;
   const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
   const manager = new JobManager({
     config: DEFAULT_CONFIG,
@@ -228,15 +239,17 @@ async function testStartJobLoadsRepoAgentsInstructionsAndPassesThemToPlannerAndE
     workspaceManager: {
       ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
     },
-    planner: async (task): Promise<PlanResult> => {
+    planner: async (task, _repoRoot, _baseBranch, runtimePreferences): Promise<PlanResult> => {
       plannerInstructions = task;
+      plannerPreferences = runtimePreferences;
       return {
         summary: "Single item",
         workItems: [{ id: "WI-1", title: "Apply change", prompt: "Do the work", dependsOn: [] }]
       };
     },
-    executor: async ({ prompt }): Promise<ExecutionResult> => {
+    executor: async ({ prompt, model, modelReasoningEffort }): Promise<ExecutionResult> => {
       executorInstructions = prompt;
+      executorPreferences = { model, modelReasoningEffort };
       return {
         status: "completed",
         summary: "done",
@@ -253,10 +266,71 @@ async function testStartJobLoadsRepoAgentsInstructionsAndPassesThemToPlannerAndE
   assert.match(plannerInstructions ?? "", /Repository instructions file: .*AGENTS\.md/);
   assert.match(plannerInstructions ?? "", /Use snake_case helpers and keep tests updated\./);
   assert.match(plannerInstructions ?? "", /Task: Apply change/);
+  assert.deepEqual(plannerPreferences, { model: "gpt-5.4", modelReasoningEffort: "high" });
   assert.match(executorInstructions ?? "", /Repository instructions file: .*AGENTS\.md/);
   assert.match(executorInstructions ?? "", /Use snake_case helpers and keep tests updated\./);
   assert.match(executorInstructions ?? "", /Do the work/);
+  assert.deepEqual(executorPreferences, { model: "gpt-5.4", modelReasoningEffort: "high" });
   assert.equal(job.events.some((event) => /Loaded repository instructions/.test(event.message)), true);
+}
+
+async function testRepoAgentsPreferencesPersistModelAndReasoning(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-agents-prefs-"));
+  const saved = await saveRepoAgentsPreferences(root, {
+    model: "gpt-5.4",
+    reasoningEffort: "high"
+  });
+
+  assert.equal(saved.model, "gpt-5.4");
+  assert.equal(saved.reasoningEffort, "high");
+
+  const loaded = await loadRepoAgentsPreferences(root);
+  assert.equal(loaded?.model, "gpt-5.4");
+  assert.equal(loaded?.reasoningEffort, "high");
+
+  await saveRepoAgentsPreferences(root, {
+    model: "gpt-5.4-mini",
+    reasoningEffort: "medium"
+  });
+
+  const updated = await loadRepoAgentsPreferences(root);
+  assert.equal(updated?.model, "gpt-5.4-mini");
+  assert.equal(updated?.reasoningEffort, "medium");
+  assert.match(updated?.content ?? "", /^model: gpt-5\.4-mini/im);
+  assert.match(updated?.content ?? "", /^reasoning_effort: medium/im);
+}
+
+async function testCliConfigSetPersistsRepoModelAndReasoning(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-cli-config-"));
+  await ensureFelixDirectories(root);
+  await writeJsonFile(path.join(root, ".felixai", "config.json"), structuredClone(DEFAULT_CONFIG));
+  await runCommand("git", ["init", "-b", "main"], { cwd: root });
+
+  await runCommand(process.execPath, [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js"), "config", "set", "reasoning-effort", "high"], {
+    cwd: root
+  });
+  const config = await loadConfig(root);
+  assert.equal(config.codex.modelReasoningEffort, "high");
+
+  await runCommand(
+    process.execPath,
+    [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js"), "config", "set", "model", "gpt-5.4", "--repo", root],
+    {
+      cwd: root
+    }
+  );
+  const repoPreferences = await loadRepoAgentsPreferences(root);
+  assert.equal(repoPreferences?.model, "gpt-5.4");
+
+  await runCommand(
+    process.execPath,
+    [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js"), "config", "set", "reasoning-effort", "xhigh", "--repo", root],
+    {
+      cwd: root
+    }
+  );
+  const updatedRepoPreferences = await loadRepoAgentsPreferences(root);
+  assert.equal(updatedRepoPreferences?.reasoningEffort, "xhigh");
 }
 
 async function testResumeFlow(): Promise<void> {
@@ -2162,6 +2236,7 @@ async function testCliStatusHighlightsStaleRunningWorkItems(): Promise<void> {
 
 async function main(): Promise<void> {
   await testInit();
+  await testDefaultReasoningEffortIsMedium();
   await testInvalidConfigFailsValidation();
   await testLegacyCredentialModesMigrateToCodex();
   await testPlanningPromptDiscouragesVerificationOnlyWorkItems();
@@ -2169,6 +2244,8 @@ async function main(): Promise<void> {
   await testPlanRefinementKeepsIndependentWorkItemsSplit();
   await testPlannerAndExecutionFlow();
   await testStartJobLoadsRepoAgentsInstructionsAndPassesThemToPlannerAndExecutor();
+  await testRepoAgentsPreferencesPersistModelAndReasoning();
+  await testCliConfigSetPersistsRepoModelAndReasoning();
   await testResumeFlow();
   await testLongRunningExecutionPersistsHeartbeatWarning();
   await testInvalidStateFailsValidation();

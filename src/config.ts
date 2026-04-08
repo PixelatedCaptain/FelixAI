@@ -9,14 +9,14 @@ export const DEFAULT_CONFIG: FelixConfig = {
   stateDir: ".felixai/state",
   workspaceRoot: ".felixai/workspaces",
   logDir: ".felixai/logs",
-  credentialSource: "chatgpt-session",
+  credentialSource: "codex",
   git: {
     allowDirtyWorkingTree: true
   },
   codex: {
     approvalPolicy: "never",
     sandboxMode: "workspace-write",
-    modelReasoningEffort: "high",
+    modelReasoningEffort: "medium",
     webSearchMode: "cached",
     networkAccessEnabled: false,
     parallelism: 2,
@@ -46,6 +46,12 @@ export async function loadConfig(projectRoot = process.cwd()): Promise<FelixConf
 
   const raw = await readJsonFile<unknown>(configPath);
   return validateConfig(migrateConfig(raw));
+}
+
+export async function saveConfig(config: FelixConfig, projectRoot = process.cwd()): Promise<void> {
+  const configPath = getConfigPath(projectRoot);
+  await ensureFelixDirectories(projectRoot);
+  await writeJsonFile(configPath, validateConfig(structuredClone(config)));
 }
 
 export async function writeDefaultConfig(projectRoot = process.cwd(), force = false): Promise<boolean> {

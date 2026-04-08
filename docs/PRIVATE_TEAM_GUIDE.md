@@ -130,7 +130,7 @@ Then start a job from the repo root:
 felixai job start --repo . --task "Describe the change you want"
 ```
 
-If the repo has a root-level `AGENTS.md`, FelixAI reads it automatically on jobs and uses that guidance for both planning and execution.
+If the repo has a root-level `AGENTS.md`, FelixAI reads it automatically on jobs and uses that guidance for both planning and execution. That file can also set repo defaults like `model:` and `reasoning_effort:` so FelixAI runs the way that repo expects.
 
 Useful options:
 
@@ -139,6 +139,10 @@ felixai job start --repo . --task "..." --require-clean
 felixai job start --repo . --task "..." --issue 123 --issue 456
 felixai job start --repo . --task-file .\felixai.task.json
 ```
+
+## Repo Defaults
+
+Repo owners can standardize FelixAI behavior by committing run defaults in the root `AGENTS.md`, especially the Codex `model:` and `reasoning_effort:` values for that codebase.
 
 ## Normal Workflow
 

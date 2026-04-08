@@ -1,4 +1,4 @@
-import { Codex, type CodexOptions, type ThreadOptions } from "@openai/codex-sdk";
+import { Codex, type CodexOptions, type ModelReasoningEffort, type ThreadOptions } from "@openai/codex-sdk";
 
 import type { ExecutionResult, FelixConfig, PlanResult } from "./types.js";
 
@@ -15,7 +15,7 @@ const PLAN_SCHEMA = {
           title: { type: "string" },
           prompt: { type: "string" },
           issueRefs: {
-            type: "array",
+            type: ["array", "null"],
             items: { type: "string" }
           },
           dependsOn: {
@@ -23,7 +23,7 @@ const PLAN_SCHEMA = {
             items: { type: "string" }
           }
         },
-        required: ["id", "title", "prompt", "dependsOn"],
+        required: ["id", "title", "prompt", "issueRefs", "dependsOn"],
         additionalProperties: false
       }
     }
@@ -40,14 +40,46 @@ const EXECUTION_SCHEMA = {
       enum: ["completed", "needs_resume", "blocked"]
     },
     summary: { type: "string" },
-    nextPrompt: { type: "string" }
+    nextPrompt: { type: ["string", "null"] }
   },
-  required: ["status", "summary"],
+  required: ["status", "summary", "nextPrompt"],
   additionalProperties: false
 } as const;
 
 function parseJson<T>(value: string): T {
   return JSON.parse(value) as T;
+}
+
+function normalizePlanResult(plan: PlanResult): PlanResult {
+  return {
+    ...plan,
+    workItems: plan.workItems.map((item) => ({
+      ...item,
+      issueRefs: item.issueRefs ?? []
+    }))
+  };
+}
+
+function normalizeExecutionResult(result: ExecutionResult): ExecutionResult {
+  return {
+    ...result,
+    nextPrompt: result.nextPrompt ?? undefined
+  };
+}
+
+export function buildPlanningPrompt(task: string, baseBranch: string): string {
+  return [
+    "You are the planning session for FelixAI Orchestrator.",
+    "Break the large engineering task into work items that are each reasonable for one Codex session.",
+    "Prefer 2-6 work items unless the task is trivial.",
+    "Keep dependencies explicit in dependsOn.",
+    "If issue references are known, include them in issueRefs as strings like '123' or 'GH-123'.",
+    "Do not create separate verification-only, review-only, or diff-check-only work items when that verification can be done inside the implementation work item.",
+    "Only create a separate verification work item when it produces a durable artifact, runs a genuinely independent validation workflow, or the user explicitly asked for a separate validation step.",
+    "Avoid no-op work items that would leave their branch with no changes relative to the base branch.",
+    `Base branch: ${baseBranch}.`,
+    `Task: ${task}`
+  ].join("\n\n");
 }
 
 export class CodexAdapter {
@@ -57,19 +89,16 @@ export class CodexAdapter {
     this.codex = new Codex(this.getCodexOptions());
   }
 
-  async createPlan(task: string, repoRoot: string, baseBranch: string): Promise<PlanResult> {
-    const thread = this.codex.startThread(this.getThreadOptions(repoRoot));
-    const prompt = [
-      "You are the planning session for FelixAI Orchestrator.",
-      "Break the large engineering task into work items that are each reasonable for one Codex session.",
-      "Prefer 2-6 work items unless the task is trivial.",
-      "Keep dependencies explicit in dependsOn.",
-      "If issue references are known, include them in issueRefs as strings like '123' or 'GH-123'.",
-      `Base branch: ${baseBranch}.`,
-      `Task: ${task}`
-    ].join("\n\n");
+  async createPlan(
+    task: string,
+    repoRoot: string,
+    baseBranch: string,
+    runtimePreferences?: { model?: string; modelReasoningEffort?: ModelReasoningEffort }
+  ): Promise<PlanResult> {
+    const thread = this.codex.startThread(this.getThreadOptions(repoRoot, runtimePreferences));
+    const prompt = buildPlanningPrompt(task, baseBranch);
     const turn = await thread.run(prompt, { outputSchema: PLAN_SCHEMA });
-    return parseJson<PlanResult>(turn.finalResponse);
+    return normalizePlanResult(parseJson<PlanResult>(turn.finalResponse));
   }
 
   async executeWorkItem(options: {
@@ -77,10 +106,23 @@ export class CodexAdapter {
     workspacePath: string;
     sessionId?: string;
     resumePrompt?: string;
+    model?: string;
+    modelReasoningEffort?: ModelReasoningEffort;
   }): Promise<ExecutionResult> {
     const thread = options.sessionId
-      ? this.codex.resumeThread(options.sessionId, this.getThreadOptions(options.workspacePath))
-      : this.codex.startThread(this.getThreadOptions(options.workspacePath));
+      ? this.codex.resumeThread(
+          options.sessionId,
+          this.getThreadOptions(options.workspacePath, {
+            model: options.model,
+            modelReasoningEffort: options.modelReasoningEffort
+          })
+        )
+      : this.codex.startThread(
+          this.getThreadOptions(options.workspacePath, {
+            model: options.model,
+            modelReasoningEffort: options.modelReasoningEffort
+          })
+        );
 
     const input = options.resumePrompt ?? [
       "You are executing one FelixAI work item in an isolated Git workspace.",
@@ -92,19 +134,23 @@ export class CodexAdapter {
     ].join("\n\n");
 
     const turn = await thread.run(input, { outputSchema: EXECUTION_SCHEMA });
-    const result = parseJson<ExecutionResult>(turn.finalResponse);
+    const result = normalizeExecutionResult(parseJson<ExecutionResult>(turn.finalResponse));
     return {
       ...result,
       sessionId: thread.id ?? options.sessionId
     };
   }
 
-  private getThreadOptions(workingDirectory: string): ThreadOptions {
+  private getThreadOptions(
+    workingDirectory: string,
+    runtimePreferences?: { model?: string; modelReasoningEffort?: ModelReasoningEffort }
+  ): ThreadOptions {
     return {
+      model: runtimePreferences?.model,
       workingDirectory,
       approvalPolicy: this.config.codex.approvalPolicy,
       sandboxMode: this.config.codex.sandboxMode,
-      modelReasoningEffort: this.config.codex.modelReasoningEffort,
+      modelReasoningEffort: runtimePreferences?.modelReasoningEffort ?? this.config.codex.modelReasoningEffort,
       webSearchMode: this.config.codex.webSearchMode,
       networkAccessEnabled: this.config.codex.networkAccessEnabled,
       skipGitRepoCheck: false
@@ -112,23 +158,11 @@ export class CodexAdapter {
   }
 
   private getCodexOptions(): CodexOptions {
-    if (this.config.credentialSource === "env-api-key") {
-      const apiKey = process.env.OPENAI_API_KEY;
-      if (!apiKey) {
-        throw new Error("FelixAI is configured for env-api-key credentials, but OPENAI_API_KEY is not set.");
-      }
-
-      return {
-        apiKey,
-        env: {
-          OPENAI_API_KEY: apiKey
-        }
-      };
-    }
-
-    // Force the SDK to use the local Codex/ChatGPT session instead of any ambient API key.
+    // Force the SDK to use the local Codex session instead of any ambient API-key auth.
     return {
-      env: {}
+      env: {
+        OPENAI_API_KEY: ""
+      }
     };
   }
 }
