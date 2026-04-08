@@ -28,7 +28,65 @@ npm install
 npm run build
 ```
 
-Codex CLI authentication must already be available locally, or `CODEX_API_KEY` must be set for the SDK environment.
+Codex authentication must already be available locally. FelixAI is intentionally Codex-session only and does not use API-key auth.
+The build now clears `dist/` first so compiled output matches the current `src/` tree.
+
+## Packaging
+
+For npm package validation:
+
+```bash
+npm run pack:dry-run
+```
+
+For a Windows zip artifact containing the built CLI:
+
+```bash
+npm run release:windows
+```
+
+This writes a versioned zip under `tmp/release/`.
+
+For a private NuGet package that can be installed as a .NET tool:
+
+```bash
+npm run pack:nuget
+```
+
+This writes a `.nupkg` under `tmp/nuget/`.
+
+To publish that package to your private feed:
+
+```powershell
+$env:FELIXAI_NUGET_FEED_URL = "<feed-url>"
+$env:FELIXAI_NUGET_API_KEY = "<api-key>"
+npm run publish:nuget
+```
+
+To install or update FelixAI from the same feed with a verification step:
+
+```powershell
+$env:FELIXAI_NUGET_FEED_URL = "<feed-url>"
+npm run install:nuget -- --global
+```
+
+## Private NuGet Install
+
+FelixAI can be distributed through a private NuGet feed as a .NET tool wrapper around the bundled Node CLI.
+
+Requirements on the target machine:
+
+- .NET tool support
+- Node.js 18+ on `PATH`
+
+Install from your private feed:
+
+```powershell
+dotnet tool install --global FelixAI.Tool --add-source <your-feed>
+felixai version
+```
+
+If Node is installed in a non-standard location, set `FELIXAI_NODE_EXE` before running `felixai`.
 
 ## Bootstrap
 
@@ -46,16 +104,19 @@ This creates:
 
 ## Credentials
 
-FelixAI uses one explicit credential source at a time, configured in `.felixai/config.json`:
-
-- `chatgpt-session`: use the local Codex/ChatGPT login session only
-- `env-api-key`: use `OPENAI_API_KEY` only
-
-The default is `chatgpt-session` so ambient shell API keys do not create ambiguity.
+FelixAI uses the local Codex session only, configured as `codex` in `.felixai/config.json`.
+Ambient API-key auth is intentionally ignored so local behavior stays aligned with Codex.
+Use `felixai auth login` to start Codex login, `felixai auth status` to inspect the active login, and `felixai auth logout` to sign out.
+Codex owns the stored session under the local `~/.codex` state, and FelixAI reuses that session until you explicitly sign out.
+Use `felixai doctor` before running jobs if you want a quick preflight over Codex, Git, GitHub CLI, and common auth conflicts.
 
 ## CLI
 
 ```bash
+felixai auth login
+felixai auth status
+felixai auth logout
+felixai doctor
 felixai init
 felixai config show
 felixai version
@@ -127,6 +188,9 @@ FelixAI validates that the target path is a Git repository and that the selected
 - [App plan](./docs/APP_PLAN.md)
 - [Architecture](./docs/ARCHITECTURE.md)
 - [Release plan](./docs/RELEASE_PLAN.md)
+- [Private team guide](./docs/PRIVATE_TEAM_GUIDE.md)
+- [Validation matrix](./docs/VALIDATION_MATRIX.md)
+- [Release checklist](./docs/RELEASE_CHECKLIST.md)
 
 ## Current MVP Shape
 
@@ -136,3 +200,4 @@ FelixAI validates that the target path is a Git repository and that the selected
 4. Isolated Git workspaces and temporary branches
 5. Multi-session orchestration with dependency-aware scheduling
 6. Boundary-aware resume flow
+7. Deterministic local build and package artifacts

@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>felixai</ToolCommandName>
+    <PackageId>FelixAI.Tool</PackageId>
+    <PackageTitle>FelixAI Tool</PackageTitle>
+    <Description>Private NuGet distribution of the FelixAI CLI.</Description>
+    <Authors>Pat Breslin</Authors>
+    <PackageTags>felixai;codex;cli;orchestration</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageOutputPath>..\..\tmp\nuget</PackageOutputPath>
+    <Version>0.1.0</Version>
+    <AssemblyName>FelixAI.Tool</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <Content Include="..\..\dist\**\*">
+      <Link>dist\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\..\package.json">
+      <Link>package.json</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+</Project>
