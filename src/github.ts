@@ -6,6 +6,10 @@ function buildEnvWithoutGitHubToken(): NodeJS.ProcessEnv {
   return env;
 }
 
+function hasRetryableGitHubTokenError(message: string): boolean {
+  return /HTTP 401: Bad credentials/i.test(message) || /failed to log in to github\.com using token/i.test(message);
+}
+
 function normalizeRemoteUrl(remoteUrl: string): string {
   return remoteUrl.trim().replace(/\.git$/, "");
 }
@@ -39,6 +43,34 @@ export async function createPullRequest(options: {
   return createPullRequestWithRunner(options, runCommand);
 }
 
+export async function runGitHubCli(
+  repoPath: string,
+  args: string[]
+): Promise<{ stdout: string; stderr: string }> {
+  return runGitHubCliWithRunner(repoPath, args, runCommand);
+}
+
+export async function runGitHubCliWithRunner(
+  repoPath: string,
+  args: string[],
+  runner: typeof runCommand
+): Promise<{ stdout: string; stderr: string }> {
+  try {
+    return await runner("gh", args, { cwd: repoPath });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const ghAuthStatus = await getGitHubCliStatusWithRunner(repoPath, runner);
+    if (hasGitHubTokenPrecedenceConflict(ghAuthStatus) || (!!process.env.GITHUB_TOKEN && hasRetryableGitHubTokenError(message))) {
+      return await runner("gh", args, {
+        cwd: repoPath,
+        env: buildEnvWithoutGitHubToken()
+      });
+    }
+
+    throw new Error(message);
+  }
+}
+
 export async function createPullRequestWithRunner(
   options: {
     repoPath: string;
@@ -67,7 +99,7 @@ export async function createPullRequestWithRunner(
   }
 
   try {
-    const result = await runner("gh", args, { cwd: options.repoPath });
+    const result = await runGitHubCliWithRunner(options.repoPath, args, runner);
     const url = result.stdout.split(/\r?\n/).find((line) => /^https:\/\/github\.com\//i.test(line.trim()))?.trim();
     const numberMatch = url?.match(/\/pull\/(\d+)$/);
     return {
@@ -80,10 +112,7 @@ export async function createPullRequestWithRunner(
     const ghAuthStatus = await getGitHubCliStatusWithRunner(options.repoPath, runner);
     if (hasGitHubTokenPrecedenceConflict(ghAuthStatus)) {
       try {
-        const result = await runner("gh", args, {
-          cwd: options.repoPath,
-          env: buildEnvWithoutGitHubToken()
-        });
+        const result = await runGitHubCliWithRunner(options.repoPath, args, runner);
         const url = result.stdout.split(/\r?\n/).find((line) => /^https:\/\/github\.com\//i.test(line.trim()))?.trim();
         const numberMatch = url?.match(/\/pull\/(\d+)$/);
         return {

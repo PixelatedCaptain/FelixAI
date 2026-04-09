@@ -247,7 +247,7 @@ Merge automation attempts are persisted separately from merge-readiness analysis
 
 FelixAI validates that the target path is a Git repository and that the selected base branch exists.
 When a repo contains a root-level `AGENTS.md`, FelixAI automatically reads it during jobs and passes that guidance through to the planner and executor.
-That same `AGENTS.md` file can also carry repo-scoped FelixAI run defaults such as `model:` and `reasoning_effort:`.
+That same `AGENTS.md` file can also carry repo-scoped FelixAI run defaults such as `model:`, `reasoning_effort:`, `turbo_mode:`, and `encourage_subagents:`.
 
 - By default, dirty working trees are allowed.
 - Use `--require-clean` on `job start` to block execution when the repo has uncommitted changes.
@@ -257,6 +257,8 @@ Example repo defaults in `AGENTS.md`:
 ```md
 model: gpt-5.4
 reasoning_effort: high
+turbo_mode: enabled
+encourage_subagents: enabled
 ```
 
 ## Issue traceability
@@ -264,6 +266,17 @@ reasoning_effort: high
 - Use `--issue <id>` on `job start` to attach one or more issue references to the job.
 - Planner work items can also include issue references.
 - FelixAI carries issue references into persisted state, CLI output, and branch naming when available.
+
+## Issue Planning
+
+FelixAI can snapshot unfinished GitHub issues for the current repo and ask Codex to produce a dependency-aware execution order:
+
+```powershell
+felixai issues snapshot --repo .
+felixai issues plan --repo . --directive "Review unfinished issues and choose the safest implementation order"
+```
+
+Issue snapshots and issue plans are persisted under `.felixai/state/issues/`.
 
 ## GitHub alignment
 

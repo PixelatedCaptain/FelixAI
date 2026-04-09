@@ -9,7 +9,10 @@ import { getCodexAuthStatus, loginWithCodex, logoutFromCodex } from "./auth.js";
 import { loadConfig, saveConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import { assertGitRepository, resolveGitRoot } from "./git.js";
+import { snapshotUnfinishedGitHubIssues } from "./github-issues.js";
 import { initializeProject } from "./init.js";
+import { IssuePlanner } from "./issue-planner.js";
+import { saveIssuePlan } from "./issue-state.js";
 import { createJobManager } from "./job-manager.js";
 import { loadRepoAgentsPreferences, saveRepoAgentsPreferences } from "./repo-agents.js";
 import type { JobState } from "./types.js";
@@ -28,6 +31,10 @@ Usage:
   felixai config show
   felixai config set reasoning-effort <minimal|low|medium|high|xhigh> [--repo <path>]
   felixai config set model <model-name> [--repo <path>]
+  felixai config set turbo-mode <enabled|disabled> [--repo <path>]
+  felixai config set encourage-subagents <enabled|disabled> [--repo <path>]
+  felixai issues snapshot --repo <path> [--json]
+  felixai issues plan --repo <path> [--directive "<text>"] [--json]
   felixai version
   felixai job start --repo <path> (--task "<large task>" | --task-file <file>) [--base-branch <branch>] [--parallel <n>] [--auto-resume] [--require-clean] [--issue <id>]
   felixai job status <job-id> [--json]
@@ -46,6 +53,9 @@ Examples:
   felixai config show
   felixai config set reasoning-effort medium
   felixai config set model gpt-5.4 --repo .
+  felixai config set turbo-mode enabled --repo .
+  felixai issues snapshot --repo .
+  felixai issues plan --repo . --directive "Review unfinished issues and choose the safest implementation order"
   felixai job start --repo . --task "Build the next milestone"
   felixai job start --repo . --task-file ./felixai.task.json --parallel 3 --auto-resume
   felixai job start --repo . --task "Refactor auth" --require-clean
@@ -171,6 +181,17 @@ function isReasoningEffort(value: string): value is ModelReasoningEffort {
   return ["minimal", "low", "medium", "high", "xhigh"].includes(value);
 }
 
+function parseBooleanSetting(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (["true", "yes", "on", "enabled", "enable", "1"].includes(normalized)) {
+    return true;
+  }
+  if (["false", "no", "off", "disabled", "disable", "0"].includes(normalized)) {
+    return false;
+  }
+  throw new Error(`Invalid boolean-style value '${value}'. Use enabled/disabled, true/false, on/off, yes/no, or 1/0.`);
+}
+
 async function resolveRepoRoot(repoPath: string): Promise<string> {
   await assertGitRepository(repoPath);
   return resolveGitRoot(repoPath);
@@ -225,6 +246,12 @@ async function printRepoPreferences(repoRoot: string, options?: { includePath?: 
   }
   if (preferences.reasoningEffort) {
     console.log(`[felixai] repo reasoning effort: ${preferences.reasoningEffort}`);
+  }
+  if (preferences.turboMode !== undefined) {
+    console.log(`[felixai] repo turbo mode: ${preferences.turboMode ? "enabled" : "disabled"}`);
+  }
+  if (preferences.encourageSubagents !== undefined) {
+    console.log(`[felixai] repo encourage subagents: ${preferences.encourageSubagents ? "enabled" : "disabled"}`);
   }
 }
 
@@ -356,10 +383,97 @@ async function main(): Promise<void> {
           return;
         }
 
-        throw new Error(`Unknown config setting '${settingName}'. Use 'reasoning-effort' or 'model'.`);
+        if (settingName === "turbo-mode") {
+          const repoRoot = await resolveRepoRoot(path.resolve(repoFlagValue ?? process.cwd()));
+          const saved = await saveRepoAgentsPreferences(repoRoot, { turboMode: parseBooleanSetting(settingValue) });
+          console.log(`[felixai] repo turbo mode: ${saved.turboMode ? "enabled" : "disabled"}`);
+          console.log(`[felixai] repo instructions: ${saved.path}`);
+          return;
+        }
+
+        if (settingName === "encourage-subagents") {
+          const repoRoot = await resolveRepoRoot(path.resolve(repoFlagValue ?? process.cwd()));
+          const saved = await saveRepoAgentsPreferences(repoRoot, { encourageSubagents: parseBooleanSetting(settingValue) });
+          console.log(`[felixai] repo encourage subagents: ${saved.encourageSubagents ? "enabled" : "disabled"}`);
+          console.log(`[felixai] repo instructions: ${saved.path}`);
+          return;
+        }
+
+        throw new Error(`Unknown config setting '${settingName}'. Use 'reasoning-effort', 'model', 'turbo-mode', or 'encourage-subagents'.`);
       }
 
       throw new Error(`Unknown config subcommand '${configCommand ?? ""}'. Use 'show' or 'set'.`);
+    }
+    case "issues": {
+      const issuesCommand = rest[0];
+      const issuesArgs = rest.slice(1);
+
+      switch (issuesCommand) {
+        case "snapshot": {
+          const repoPath = path.resolve(requireValue(getFlagValue(issuesArgs, "--repo"), "Missing --repo value."));
+          const repoRoot = await resolveRepoRoot(repoPath);
+          const { snapshot, outputPath } = await snapshotUnfinishedGitHubIssues(repoRoot, repoRoot);
+          if (hasFlag(issuesArgs, "--json")) {
+            console.log(JSON.stringify(snapshot, null, 2));
+            return;
+          }
+
+          console.log(`[felixai] issue snapshot saved: ${outputPath}`);
+          console.log(`[felixai] unfinished issues: ${snapshot.issues.length}`);
+          for (const issue of snapshot.issues) {
+            console.log(`[felixai] issue #${issue.number}: ${issue.title}`);
+          }
+          return;
+        }
+        case "plan": {
+          const repoPath = path.resolve(requireValue(getFlagValue(issuesArgs, "--repo"), "Missing --repo value."));
+          const repoRoot = await resolveRepoRoot(repoPath);
+          await ensureRepoModelPreference(repoRoot);
+          const directive =
+            getFlagValue(issuesArgs, "--directive") ??
+            "Review unfinished GitHub issues and determine the safest order to complete them, including dependencies and parallel-safe work.";
+          const { snapshot, outputPath: snapshotPath } = await snapshotUnfinishedGitHubIssues(repoRoot, repoRoot);
+          const config = await loadConfig(repoRoot);
+          const repoPreferences = await loadRepoAgentsPreferences(repoRoot);
+          const planner = new IssuePlanner(config);
+          const plan = await planner.createIssuePlan({
+            directive,
+            repoRoot,
+            issues: snapshot.issues,
+            model: repoPreferences?.model,
+            modelReasoningEffort: repoPreferences?.reasoningEffort,
+            turboMode: repoPreferences?.turboMode,
+            encourageSubagents: repoPreferences?.encourageSubagents
+          });
+          const planDocument = {
+            repoRoot,
+            generatedAt: new Date().toISOString(),
+            directive,
+            snapshotPath,
+            orderedIssues: plan.orderedIssues,
+            summary: plan.summary
+          };
+          const planPath = await saveIssuePlan(repoRoot, repoRoot, planDocument);
+
+          if (hasFlag(issuesArgs, "--json")) {
+            console.log(JSON.stringify(planDocument, null, 2));
+            return;
+          }
+
+          console.log(`[felixai] issue plan saved: ${planPath}`);
+          console.log(`[felixai] issue snapshot: ${snapshotPath}`);
+          console.log(`[felixai] issue plan summary: ${plan.summary}`);
+          for (const item of plan.orderedIssues) {
+            const dependsOn = item.dependsOn.length > 0 ? item.dependsOn.map((issue) => `#${issue}`).join(", ") : "none";
+            console.log(
+              `[felixai] issue #${item.issueNumber}: parallel_safe=${item.parallelSafe ? "yes" : "no"} overlap=${item.overlapRisk} depends_on=${dependsOn}`
+            );
+          }
+          return;
+        }
+        default:
+          throw new Error(`Unknown issues subcommand '${issuesCommand ?? ""}'. Use 'snapshot' or 'plan'.`);
+      }
     }
     case "version": {
       console.log(`[felixai] version: ${packageJson.version}`);

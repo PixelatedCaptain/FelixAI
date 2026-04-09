@@ -130,7 +130,7 @@ Then start a job from the repo root:
 felixai job start --repo . --task "Describe the change you want"
 ```
 
-If the repo has a root-level `AGENTS.md`, FelixAI reads it automatically on jobs and uses that guidance for both planning and execution. That file can also set repo defaults like `model:` and `reasoning_effort:` so FelixAI runs the way that repo expects.
+If the repo has a root-level `AGENTS.md`, FelixAI reads it automatically on jobs and uses that guidance for both planning and execution. That file can also set repo defaults like `model:`, `reasoning_effort:`, `turbo_mode:`, and `encourage_subagents:` so FelixAI runs the way that repo expects.
 
 Useful options:
 
@@ -142,7 +142,18 @@ felixai job start --repo . --task-file .\felixai.task.json
 
 ## Repo Defaults
 
-Repo owners can standardize FelixAI behavior by committing run defaults in the root `AGENTS.md`, especially the Codex `model:` and `reasoning_effort:` values for that codebase.
+Repo owners can standardize FelixAI behavior by committing run defaults in the root `AGENTS.md`, especially the Codex `model:` and `reasoning_effort:` values for that codebase, plus repo-scoped execution policy like `turbo_mode:` and `encourage_subagents:`.
+
+## Issue Planning
+
+To snapshot unfinished GitHub issues and ask Codex for the safest execution order:
+
+```powershell
+felixai issues snapshot --repo .
+felixai issues plan --repo . --directive "Review unfinished issues and choose the safest implementation order"
+```
+
+FelixAI stores the snapshot and the resulting issue plan under `.felixai/state/issues/`.
 
 ## Normal Workflow
 

@@ -9,12 +9,14 @@ import { buildPlanningPrompt } from "./codex-adapter.js";
 import { DEFAULT_CONFIG, ensureFelixDirectories, loadConfig } from "./config.js";
 import { analyzeGitHubAuthStatus } from "./doctor.js";
 import { pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
+import { normalizeGitHubIssues, snapshotUnfinishedGitHubIssues } from "./github-issues.js";
 import { commitAllChanges, getBranchPushStatus } from "./git.js";
 import { buildPullRequestFailureMessage, createPullRequestWithRunner, hasGitHubTokenPrecedenceConflict } from "./github.js";
+import { buildIssuePlanningPrompt, validateIssuePlanningResult, type GitHubIssueSnapshotItem } from "./issue-planner.js";
 import { initializeProject } from "./init.js";
 import { createJobManager, JobManager } from "./job-manager.js";
 import { runCommand } from "./process-utils.js";
-import { loadRepoAgentsPreferences, saveRepoAgentsPreferences } from "./repo-agents.js";
+import { loadRepoAgentsPreferences, parseRepoAgentsPreferences, saveRepoAgentsPreferences } from "./repo-agents.js";
 import { StateStore } from "./state-store.js";
 import { refinePlanResult } from "./validation.js";
 import { WorkspaceManager } from "./workspace-manager.js";
@@ -125,6 +127,118 @@ async function testPlanningPromptDiscouragesVerificationOnlyWorkItems(): Promise
   assert.match(prompt, /Do not create separate verification-only, review-only, or diff-check-only work items/i);
   assert.match(prompt, /Avoid no-op work items that would leave their branch with no changes relative to the base branch/i);
   assert.match(prompt, /Only create a separate verification work item when it produces a durable artifact/i);
+}
+
+async function testIssuePlanningPromptAndValidation(): Promise<void> {
+  const issues: GitHubIssueSnapshotItem[] = [
+    {
+      number: 12,
+      title: "Add retry handling",
+      body: "Implement retry handling in the service layer.",
+      labels: ["backend"],
+      assignees: [],
+      state: "OPEN",
+      updatedAt: "2026-04-09T00:00:00Z",
+      url: "https://github.com/example/repo/issues/12"
+    },
+    {
+      number: 18,
+      title: "Add retry tests",
+      body: "Cover retry handling with tests.",
+      labels: ["tests"],
+      assignees: [],
+      state: "OPEN",
+      updatedAt: "2026-04-09T00:00:00Z",
+      url: "https://github.com/example/repo/issues/18"
+    }
+  ];
+
+  const prompt = buildIssuePlanningPrompt({
+    directive: "Review unfinished GitHub issues and figure out the best order to complete them.",
+    repoRoot: "C:\\repo",
+    issues
+  });
+
+  assert.match(prompt, /GitHub issue planning session for FelixAI Orchestrator/i);
+  assert.match(prompt, /parallelSafe=true only when the issue can likely run in parallel/i);
+  assert.match(prompt, /#?12|Add retry handling/);
+
+  const validated = validateIssuePlanningResult(
+    {
+      summary: "Implement retry handling before tests.",
+      orderedIssues: [
+        {
+          issueNumber: 12,
+          title: "Add retry handling",
+          dependsOn: [],
+          parallelSafe: false,
+          overlapRisk: "medium",
+          reasoning: "Touches core service behavior."
+        },
+        {
+          issueNumber: 18,
+          title: "Add retry tests",
+          dependsOn: [12],
+          parallelSafe: false,
+          overlapRisk: "high",
+          reasoning: "Depends on the implementation work landing first."
+        }
+      ]
+    },
+    issues
+  );
+
+  assert.equal(validated.orderedIssues.length, 2);
+  await assert.rejects(
+    Promise.resolve().then(() =>
+      validateIssuePlanningResult(
+        {
+          summary: "Broken",
+          orderedIssues: [
+            {
+              issueNumber: 12,
+              title: "Add retry handling",
+              dependsOn: [],
+              parallelSafe: true,
+              overlapRisk: "low",
+              reasoning: "ok"
+            }
+          ]
+        },
+        issues
+      )
+    ),
+    /omitted issues/i
+  );
+}
+
+async function testNormalizeGitHubIssuesAndSnapshotPersistence(): Promise<void> {
+  const normalized = normalizeGitHubIssues([
+    {
+      id: "I_123",
+      number: 7,
+      title: " Add docs command ",
+      body: "First paragraph.\n\nSecond paragraph.",
+      state: "OPEN",
+      updatedAt: "2026-04-09T00:00:00Z",
+      url: "https://github.com/example/repo/issues/7",
+      labels: [{ name: "docs" }],
+      assignees: [{ login: "pat" }]
+    }
+  ]);
+
+  assert.equal(normalized.length, 1);
+  assert.equal(normalized[0]?.bodySummary, "First paragraph.");
+  assert.deepEqual(normalized[0]?.labels, ["docs"]);
+  assert.deepEqual(normalized[0]?.assignees, ["pat"]);
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-issue-snapshot-"));
+  await runCommand("git", ["init", "-b", "main"], { cwd: root });
+  const { snapshot, outputPath } = await snapshotUnfinishedGitHubIssues(root, root, {
+    fetchIssues: async () => normalized
+  });
+  assert.equal(snapshot.issues.length, 1);
+  assert.ok(await pathExists(outputPath));
 }
 
 async function testPlanRefinementCollapsesCoupledTestWorkItems(): Promise<void> {
@@ -316,6 +430,18 @@ async function testRepoAgentsPreferencesPersistModelAndReasoning(): Promise<void
   assert.equal(updated?.reasoningEffort, "medium");
   assert.match(updated?.content ?? "", /^model: gpt-5\.4-mini/im);
   assert.match(updated?.content ?? "", /^reasoning_effort: medium/im);
+}
+
+async function testRepoAgentsPreferencesParseExecutionPolicy(): Promise<void> {
+  const parsed = parseRepoAgentsPreferences(
+    ["model: gpt-5.4", "reasoning_effort: high", "turbo_mode: enabled", "encourage_subagents: true"].join("\n"),
+    "AGENTS.md"
+  );
+
+  assert.equal(parsed?.model, "gpt-5.4");
+  assert.equal(parsed?.reasoningEffort, "high");
+  assert.equal(parsed?.turboMode, true);
+  assert.equal(parsed?.encourageSubagents, true);
 }
 
 async function testCliConfigSetPersistsRepoModelAndReasoning(): Promise<void> {
@@ -2259,12 +2385,15 @@ async function main(): Promise<void> {
   await testInvalidConfigFailsValidation();
   await testLegacyCredentialModesMigrateToCodex();
   await testPlanningPromptDiscouragesVerificationOnlyWorkItems();
+  await testIssuePlanningPromptAndValidation();
   await testPlanRefinementCollapsesCoupledTestWorkItems();
   await testPlanRefinementKeepsIndependentWorkItemsSplit();
   await testPlannerAndExecutionFlow();
   await testStartJobLoadsRepoAgentsInstructionsAndPassesThemToPlannerAndExecutor();
   await testRepoAgentsPreferencesPersistModelAndReasoning();
+  await testRepoAgentsPreferencesParseExecutionPolicy();
   await testCliConfigSetPersistsRepoModelAndReasoning();
+  await testNormalizeGitHubIssuesAndSnapshotPersistence();
   await testResumeFlow();
   await testLongRunningExecutionPersistsHeartbeatWarning();
   await testInvalidStateFailsValidation();

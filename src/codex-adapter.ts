@@ -1,5 +1,6 @@
 import { Codex, type CodexOptions, type ModelReasoningEffort, type ThreadOptions } from "@openai/codex-sdk";
 
+import { parseRepoAgentsPreferences } from "./repo-agents.js";
 import type { ExecutionResult, FelixConfig, PlanResult } from "./types.js";
 
 const PLAN_SCHEMA = {
@@ -82,6 +83,57 @@ export function buildPlanningPrompt(task: string, baseBranch: string): string {
   ].join("\n\n");
 }
 
+interface RuntimeExecutionPreferences {
+  model?: string;
+  modelReasoningEffort?: ModelReasoningEffort;
+  turboMode?: boolean;
+  encourageSubagents?: boolean;
+}
+
+function deriveExecutionPreferences(
+  input: string,
+  runtimePreferences?: RuntimeExecutionPreferences
+): RuntimeExecutionPreferences {
+  const repoPreferences = parseRepoAgentsPreferences(input);
+  return {
+    model: runtimePreferences?.model ?? repoPreferences?.model,
+    modelReasoningEffort: runtimePreferences?.modelReasoningEffort ?? repoPreferences?.reasoningEffort,
+    turboMode: runtimePreferences?.turboMode ?? repoPreferences?.turboMode,
+    encourageSubagents: runtimePreferences?.encourageSubagents ?? repoPreferences?.encourageSubagents
+  };
+}
+
+function buildExecutionPolicyHint(preferences: RuntimeExecutionPreferences): string | undefined {
+  const hints: string[] = [];
+
+  if (preferences.turboMode) {
+    hints.push(
+      "Repository execution policy: turbo mode is enabled. Prefer decisive progress, keep momentum high, and avoid unnecessary back-and-forth when a safe implementation path is clear."
+    );
+  }
+
+  if (preferences.encourageSubagents) {
+    hints.push(
+      "Repository execution policy: subagent use is encouraged when the environment supports it and parallel specialist work will materially speed up planning or execution. Do not spin up subagents for trivial steps."
+    );
+  }
+
+  return hints.length > 0 ? hints.join("\n") : undefined;
+}
+
+function prependExecutionPolicyHint(input: string, preferences?: RuntimeExecutionPreferences): string {
+  if (!preferences) {
+    return input;
+  }
+
+  const hint = buildExecutionPolicyHint(preferences);
+  if (!hint) {
+    return input;
+  }
+
+  return `${hint}\n\n${input}`;
+}
+
 export class CodexAdapter {
   private readonly codex: Codex;
 
@@ -93,10 +145,11 @@ export class CodexAdapter {
     task: string,
     repoRoot: string,
     baseBranch: string,
-    runtimePreferences?: { model?: string; modelReasoningEffort?: ModelReasoningEffort }
+    runtimePreferences?: RuntimeExecutionPreferences
   ): Promise<PlanResult> {
-    const thread = this.codex.startThread(this.getThreadOptions(repoRoot, runtimePreferences));
-    const prompt = buildPlanningPrompt(task, baseBranch);
+    const executionPreferences = deriveExecutionPreferences(task, runtimePreferences);
+    const thread = this.codex.startThread(this.getThreadOptions(repoRoot, executionPreferences));
+    const prompt = prependExecutionPolicyHint(buildPlanningPrompt(task, baseBranch), executionPreferences);
     const turn = await thread.run(prompt, { outputSchema: PLAN_SCHEMA });
     return normalizePlanResult(parseJson<PlanResult>(turn.finalResponse));
   }
@@ -108,30 +161,33 @@ export class CodexAdapter {
     resumePrompt?: string;
     model?: string;
     modelReasoningEffort?: ModelReasoningEffort;
+    turboMode?: boolean;
+    encourageSubagents?: boolean;
   }): Promise<ExecutionResult> {
+    const executionPreferences = deriveExecutionPreferences(options.prompt, {
+      model: options.model,
+      modelReasoningEffort: options.modelReasoningEffort,
+      turboMode: options.turboMode,
+      encourageSubagents: options.encourageSubagents
+    });
     const thread = options.sessionId
       ? this.codex.resumeThread(
           options.sessionId,
-          this.getThreadOptions(options.workspacePath, {
-            model: options.model,
-            modelReasoningEffort: options.modelReasoningEffort
-          })
+          this.getThreadOptions(options.workspacePath, executionPreferences)
         )
-      : this.codex.startThread(
-          this.getThreadOptions(options.workspacePath, {
-            model: options.model,
-            modelReasoningEffort: options.modelReasoningEffort
-          })
-        );
+      : this.codex.startThread(this.getThreadOptions(options.workspacePath, executionPreferences));
 
-    const input = options.resumePrompt ?? [
-      "You are executing one FelixAI work item in an isolated Git workspace.",
-      "Complete the assigned implementation if possible.",
-      "If you hit a boundary and should continue in the same session, return status=needs_resume.",
-      "If human review or a blocker is required, return status=blocked.",
-      "Return a concise summary.",
-      `Work item prompt: ${options.prompt}`
-    ].join("\n\n");
+    const input = prependExecutionPolicyHint(
+      options.resumePrompt ?? [
+        "You are executing one FelixAI work item in an isolated Git workspace.",
+        "Complete the assigned implementation if possible.",
+        "If you hit a boundary and should continue in the same session, return status=needs_resume.",
+        "If human review or a blocker is required, return status=blocked.",
+        "Return a concise summary.",
+        `Work item prompt: ${options.prompt}`
+      ].join("\n\n"),
+      deriveExecutionPreferences(options.resumePrompt ?? options.prompt, executionPreferences)
+    );
 
     const turn = await thread.run(input, { outputSchema: EXECUTION_SCHEMA });
     const result = normalizeExecutionResult(parseJson<ExecutionResult>(turn.finalResponse));
@@ -143,7 +199,7 @@ export class CodexAdapter {
 
   private getThreadOptions(
     workingDirectory: string,
-    runtimePreferences?: { model?: string; modelReasoningEffort?: ModelReasoningEffort }
+    runtimePreferences?: RuntimeExecutionPreferences
   ): ThreadOptions {
     return {
       model: runtimePreferences?.model,
