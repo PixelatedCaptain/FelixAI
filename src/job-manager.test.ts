@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildPlanningPrompt } from "./codex-adapter.js";
 import { DEFAULT_CONFIG, ensureFelixDirectories, loadConfig } from "./config.js";
+import { getCandidateCodexModels, isUnsupportedCodexModelError } from "./codex-models.js";
 import { analyzeGitHubAuthStatus } from "./doctor.js";
 import { pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
 import { normalizeGitHubIssues, snapshotUnfinishedGitHubIssues } from "./github-issues.js";
@@ -62,6 +63,25 @@ async function testInit(): Promise<void> {
 
 async function testDefaultReasoningEffortIsMedium(): Promise<void> {
   assert.equal(DEFAULT_CONFIG.codex.modelReasoningEffort, "medium");
+}
+
+async function testCodexModelCandidatesPreferChatgptCompatibleModels(): Promise<void> {
+  const chatgptCandidates = getCandidateCodexModels({ rawStatus: "Logged in using ChatGPT" });
+  assert.equal(chatgptCandidates[0], "gpt-5.1-codex-max");
+  assert.ok(chatgptCandidates.includes("gpt-5.1-codex-mini"));
+
+  const defaultCandidates = getCandidateCodexModels({ rawStatus: "Logged in" });
+  assert.equal(defaultCandidates[0], "gpt-5.2-codex");
+}
+
+async function testUnsupportedCodexModelErrorDetection(): Promise<void> {
+  assert.equal(
+    isUnsupportedCodexModelError(
+      "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'GPT-5.4' model is not supported when using Codex with a ChatGPT account.\"}}"
+    ),
+    true
+  );
+  assert.equal(isUnsupportedCodexModelError("network timeout"), false);
 }
 
 async function testRunCommandResolvesWindowsCmdShims(): Promise<void> {
@@ -646,13 +666,13 @@ async function testCliConfigSetPersistsRepoModelAndReasoning(): Promise<void> {
 
   await runCommand(
     process.execPath,
-    [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js"), "config", "set", "model", "gpt-5.4", "--repo", root],
+    [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js"), "config", "set", "model", "gpt-5.1-codex-max", "--repo", root],
     {
       cwd: root
     }
   );
   const repoPreferences = await loadRepoAgentsPreferences(root);
-  assert.equal(repoPreferences?.model, "gpt-5.4");
+  assert.equal(repoPreferences?.model, "gpt-5.1-codex-max");
 
   await runCommand(
     process.execPath,
@@ -2569,6 +2589,8 @@ async function testCliStatusHighlightsStaleRunningWorkItems(): Promise<void> {
 async function main(): Promise<void> {
   await testInit();
   await testDefaultReasoningEffortIsMedium();
+  await testCodexModelCandidatesPreferChatgptCompatibleModels();
+  await testUnsupportedCodexModelErrorDetection();
   await testRunCommandResolvesWindowsCmdShims();
   await testInvalidConfigFailsValidation();
   await testLegacyCredentialModesMigrateToCodex();

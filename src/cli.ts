@@ -8,6 +8,7 @@ import packageJson from "../package.json" with { type: "json" };
 import { getCodexAuthStatus, loginWithCodex, logoutFromCodex } from "./auth.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { loadConfig, saveConfig } from "./config.js";
+import { discoverSupportedCodexModels, isUnsupportedCodexModelError, type CodexModelSupportResult } from "./codex-models.js";
 import { runDoctor } from "./doctor.js";
 import { assertGitRepository, resolveGitRoot } from "./git.js";
 import { snapshotUnfinishedGitHubIssues } from "./github-issues.js";
@@ -261,10 +262,80 @@ async function prompt(question: string): Promise<string> {
   }
 }
 
+async function promptForModelSelection(repoRoot: string, supportedModels: CodexModelSupportResult[]): Promise<string> {
+  if (supportedModels.length === 0) {
+    let manual = "";
+    while (!manual) {
+      manual = await prompt(`[felixai] Enter the Codex model for ${repoRoot}: `);
+    }
+    return manual;
+  }
+
+  console.log(`[felixai] Select the Codex model for ${repoRoot}:`);
+  for (const [index, entry] of supportedModels.entries()) {
+    const suffix = index === 0 ? " (Recommended)" : "";
+    console.log(`[felixai]   ${index + 1}. ${entry.model}${suffix}`);
+  }
+
+  while (true) {
+    const raw = await prompt(`[felixai] Choose 1-${supportedModels.length}: `);
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= supportedModels.length) {
+      return supportedModels[parsed - 1]?.model as string;
+    }
+    console.log(`[felixai] Invalid selection '${raw}'.`);
+  }
+}
+
+async function promptAndSaveRepoModel(repoRoot: string, reason?: string): Promise<void> {
+  const config = await loadConfig(repoRoot);
+  const authStatus = await getCodexAuthStatus();
+  const discovered = await discoverSupportedCodexModels(config, repoRoot, authStatus);
+  const supported = discovered.filter((entry) => entry.supported);
+  if (reason) {
+    console.log(`[felixai] ${reason}`);
+  }
+  const model = await promptForModelSelection(repoRoot, supported);
+  const saved = await saveRepoAgentsPreferences(repoRoot, { model });
+  console.log(`[felixai] saved repo model: ${saved.model}`);
+  console.log(`[felixai] repo instructions: ${saved.path}`);
+}
+
+async function validateRequestedRepoModel(repoRoot: string, model: string): Promise<void> {
+  const config = await loadConfig(repoRoot);
+  const supported = await discoverSupportedCodexModels(config, repoRoot, await getCodexAuthStatus());
+  const matching = supported.find((entry) => entry.model.toLowerCase() === model.toLowerCase());
+  if (!matching) {
+    throw new Error(`Model '${model}' is not in FelixAI's current Codex candidate list for this login.`);
+  }
+  if (!matching.supported) {
+    throw new Error(matching.error ?? `Model '${model}' is not supported by the current Codex login.`);
+  }
+}
+
 async function ensureRepoModelPreference(repoPath: string): Promise<void> {
   const repoRoot = await resolveRepoRoot(repoPath);
   const preferences = await loadRepoAgentsPreferences(repoRoot);
   if (preferences?.model) {
+    const config = await loadConfig(repoRoot);
+    const validation = await discoverSupportedCodexModels(config, repoRoot, await getCodexAuthStatus());
+    const matching = validation.find((entry) => entry.model.toLowerCase() === preferences.model?.toLowerCase());
+    if (matching?.supported) {
+      return;
+    }
+
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      throw new Error(
+        `Repository '${repoRoot}' defines an unsupported Codex model '${preferences.model}' in AGENTS.md. Update that model or remove the model line.`
+      );
+    }
+
+    await promptAndSaveRepoModel(
+      repoRoot,
+      matching?.error && isUnsupportedCodexModelError(matching.error)
+        ? `The saved repo model '${preferences.model}' is not supported by the current Codex login.`
+        : `The saved repo model '${preferences.model}' could not be validated.`
+    );
     return;
   }
 
@@ -274,14 +345,7 @@ async function ensureRepoModelPreference(repoPath: string): Promise<void> {
     );
   }
 
-  let model = "";
-  while (!model) {
-    model = await prompt(`[felixai] Enter the Codex model for ${repoRoot}: `);
-  }
-
-  const saved = await saveRepoAgentsPreferences(repoRoot, { model });
-  console.log(`[felixai] saved repo model: ${saved.model}`);
-  console.log(`[felixai] repo instructions: ${saved.path}`);
+  await promptAndSaveRepoModel(repoRoot);
 }
 
 async function printRepoPreferences(repoRoot: string, options?: { includePath?: boolean }): Promise<void> {
@@ -438,6 +502,7 @@ async function main(): Promise<void> {
 
         if (settingName === "model") {
           const repoRoot = await resolveRepoRoot(path.resolve(repoFlagValue ?? process.cwd()));
+          await validateRequestedRepoModel(repoRoot, settingValue);
           const saved = await saveRepoAgentsPreferences(repoRoot, { model: settingValue });
           console.log(`[felixai] repo model: ${saved.model}`);
           console.log(`[felixai] repo instructions: ${saved.path}`);

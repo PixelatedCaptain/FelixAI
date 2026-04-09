@@ -95,7 +95,7 @@ For a downloaded package install:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.4.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.5.nupkg `
   -Global
 ```
 
@@ -126,13 +126,13 @@ dotnet nuget add source "https://nuget.pkg.github.com/PixelatedCaptain/index.jso
 Then install FelixAI:
 
 ```powershell
-dotnet tool install --global FelixAI.Tool --add-source "felixai-github" --version 0.1.4
+dotnet tool install --global FelixAI.Tool --add-source "felixai-github" --version 0.1.5
 ```
 
 Update FelixAI later with:
 
 ```powershell
-dotnet tool update --global FelixAI.Tool --add-source "felixai-github" --version 0.1.4
+dotnet tool update --global FelixAI.Tool --add-source "felixai-github" --version 0.1.5
 ```
 
 Optional helper-script install from your private feed:
@@ -147,7 +147,7 @@ Optional helper-script install from a downloaded package:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.4.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.5.nupkg `
   -Global
 ```
 
@@ -248,6 +248,8 @@ Merge automation attempts are persisted separately from merge-readiness analysis
 FelixAI validates that the target path is a Git repository and that the selected base branch exists.
 When a repo contains a root-level `AGENTS.md`, FelixAI automatically reads it during jobs and passes that guidance through to the planner and executor.
 That same `AGENTS.md` file can also carry repo-scoped FelixAI run defaults such as `model:`, `reasoning_effort:`, `turbo_mode:`, and `encourage_subagents:`.
+When FelixAI needs a repo model interactively, it now probes Codex-compatible model candidates for the current login and shows a numbered selection list instead of taking a raw free-text model.
+If an existing `AGENTS.md` model is unsupported for the current Codex login, FelixAI prompts for a replacement and updates the `model:` line in place.
 
 - By default, dirty working trees are allowed.
 - Use `--require-clean` on `job start` to block execution when the repo has uncommitted changes.
