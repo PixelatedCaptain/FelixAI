@@ -12,7 +12,7 @@ import { pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
 import { normalizeGitHubIssues, snapshotUnfinishedGitHubIssues } from "./github-issues.js";
 import { commitAllChanges, getBranchPushStatus } from "./git.js";
 import { buildPullRequestFailureMessage, createPullRequestWithRunner, hasGitHubTokenPrecedenceConflict } from "./github.js";
-import { looksLikeIssueDrivenDirective } from "./issue-directives.js";
+import { classifyTopLevelInput, looksLikeIssueDrivenDirective } from "./issue-directives.js";
 import { buildIssuePlanningPrompt, validateIssuePlanningResult, type GitHubIssueSnapshotItem } from "./issue-planner.js";
 import { IssueRunner, selectIssueWave } from "./issue-runner.js";
 import { initializeProject } from "./init.js";
@@ -421,6 +421,12 @@ async function testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt(): Prom
   );
   assert.equal(looksLikeIssueDrivenDirective("process", ["the", "open", "github", "issues", "in", "dependency", "order"]), true);
   assert.equal(looksLikeIssueDrivenDirective("version", []), false);
+}
+
+async function testClassifyTopLevelInputRoutesKnownCommandsIssuesAndRepoPrompts(): Promise<void> {
+  assert.equal(classifyTopLevelInput("version", []), "command");
+  assert.equal(classifyTopLevelInput("review", ["all", "github", "issues"]), "issue");
+  assert.equal(classifyTopLevelInput("tell", ["me", "about", "this", "repo"]), "repo");
 }
 
 async function testPlanRefinementCollapsesCoupledTestWorkItems(): Promise<void> {
@@ -2579,6 +2585,7 @@ async function main(): Promise<void> {
   await testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues();
   await testIssueRunnerPersistsRunStateAndStopsOnBlockedIssue();
   await testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt();
+  await testClassifyTopLevelInputRoutesKnownCommandsIssuesAndRepoPrompts();
   await testResumeFlow();
   await testLongRunningExecutionPersistsHeartbeatWarning();
   await testInvalidStateFailsValidation();

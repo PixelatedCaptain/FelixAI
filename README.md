@@ -95,7 +95,7 @@ For a downloaded package install:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.3.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.4.nupkg `
   -Global
 ```
 
@@ -126,13 +126,13 @@ dotnet nuget add source "https://nuget.pkg.github.com/PixelatedCaptain/index.jso
 Then install FelixAI:
 
 ```powershell
-dotnet tool install --global FelixAI.Tool --add-source "felixai-github" --version 0.1.3
+dotnet tool install --global FelixAI.Tool --add-source "felixai-github" --version 0.1.4
 ```
 
 Update FelixAI later with:
 
 ```powershell
-dotnet tool update --global FelixAI.Tool --add-source "felixai-github" --version 0.1.3
+dotnet tool update --global FelixAI.Tool --add-source "felixai-github" --version 0.1.4
 ```
 
 Optional helper-script install from your private feed:
@@ -147,7 +147,7 @@ Optional helper-script install from a downloaded package:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.3.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.4.nupkg `
   -Global
 ```
 
@@ -276,9 +276,12 @@ felixai issues snapshot --repo .
 felixai issues plan --repo . --directive "Review unfinished issues and choose the safest implementation order"
 felixai issues run --repo . --directive "Review unfinished issues and start processing them in dependency order"
 felixai review all github issues that are not done and figure out the best order to complete them, then start processing them
+felixai tell me about this repo
 ```
 
 Issue snapshots, issue plans, and issue-run state are persisted under `.felixai/state/issues/`.
+
+For non-orchestration prompts, FelixAI now falls back to a single Codex repo session and returns the result directly.
 
 ## GitHub alignment
 

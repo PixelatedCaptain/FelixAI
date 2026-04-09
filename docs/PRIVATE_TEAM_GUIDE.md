@@ -56,7 +56,7 @@ If you distribute the `.nupkg` directly instead of using the feed, use:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.3.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.4.nupkg `
   -Global
 ```
 
@@ -153,9 +153,11 @@ felixai issues snapshot --repo .
 felixai issues plan --repo . --directive "Review unfinished issues and choose the safest implementation order"
 felixai issues run --repo . --directive "Review unfinished issues and start processing them in dependency order"
 felixai review all github issues that are not done and figure out the best order to complete them, then start processing them
+felixai tell me about this repo
 ```
 
 FelixAI stores the snapshot, issue plan, and issue-run state under `.felixai/state/issues/`.
+For any repo question that does not match the issue-driven workflow, FelixAI falls back to a single Codex repo session and returns the answer directly.
 
 ## Normal Workflow
 

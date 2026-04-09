@@ -6,12 +6,13 @@ import readline from "node:readline/promises";
 import { readJsonFile } from "./fs-utils.js";
 import packageJson from "../package.json" with { type: "json" };
 import { getCodexAuthStatus, loginWithCodex, logoutFromCodex } from "./auth.js";
+import { CodexAdapter } from "./codex-adapter.js";
 import { loadConfig, saveConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import { assertGitRepository, resolveGitRoot } from "./git.js";
 import { snapshotUnfinishedGitHubIssues } from "./github-issues.js";
 import { initializeProject } from "./init.js";
-import { looksLikeIssueDrivenDirective } from "./issue-directives.js";
+import { classifyTopLevelInput } from "./issue-directives.js";
 import { IssuePlanner } from "./issue-planner.js";
 import { IssueRunner } from "./issue-runner.js";
 import { saveIssuePlan } from "./issue-state.js";
@@ -218,6 +219,36 @@ async function runNaturalLanguageIssueDirective(command: string, rest: string[])
   }
 }
 
+async function runNaturalLanguageRepoPrompt(command: string, rest: string[]): Promise<void> {
+  const promptText = [command, ...rest].join(" ").trim();
+  const repoRoot = await resolveRepoRoot(process.cwd());
+  await ensureRepoModelPreference(repoRoot);
+  const config = await loadConfig(repoRoot);
+  const repoPreferences = await loadRepoAgentsPreferences(repoRoot);
+  const adapter = new CodexAdapter(config);
+  const input = [
+    "You are answering a direct natural-language FelixAI request for the current repository.",
+    "Inspect the repository as needed and answer the user's request directly.",
+    "Prefer concise, concrete repo-aware output.",
+    repoPreferences ? `Repository instructions file: ${repoPreferences.path}\n${repoPreferences.content}` : undefined,
+    `User request: ${promptText}`
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join("\n\n");
+  const result = await adapter.runPrompt({
+    prompt: input,
+    workspacePath: repoRoot,
+    model: repoPreferences?.model,
+    modelReasoningEffort: repoPreferences?.reasoningEffort,
+    turboMode: repoPreferences?.turboMode,
+    encourageSubagents: repoPreferences?.encourageSubagents
+  });
+  if (result.sessionId) {
+    console.log(`[felixai] session: ${result.sessionId}`);
+  }
+  console.log(result.response.trim());
+}
+
 async function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
     input: process.stdin,
@@ -286,8 +317,13 @@ async function main(): Promise<void> {
   }
 
   const rest = args.slice(1);
-  if (!["init", "auth", "doctor", "config", "issues", "version", "job"].includes(command) && looksLikeIssueDrivenDirective(command, rest)) {
+  const inputClass = classifyTopLevelInput(command, rest);
+  if (inputClass === "issue") {
     await runNaturalLanguageIssueDirective(command, rest);
+    return;
+  }
+  if (inputClass === "repo") {
+    await runNaturalLanguageRepoPrompt(command, rest);
     return;
   }
   const force = hasFlag(rest, "--force");

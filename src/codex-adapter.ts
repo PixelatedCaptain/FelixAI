@@ -197,6 +197,29 @@ export class CodexAdapter {
     };
   }
 
+  async runPrompt(options: {
+    prompt: string;
+    workspacePath: string;
+    model?: string;
+    modelReasoningEffort?: ModelReasoningEffort;
+    turboMode?: boolean;
+    encourageSubagents?: boolean;
+  }): Promise<{ sessionId?: string; response: string }> {
+    const executionPreferences = deriveExecutionPreferences(options.prompt, {
+      model: options.model,
+      modelReasoningEffort: options.modelReasoningEffort,
+      turboMode: options.turboMode,
+      encourageSubagents: options.encourageSubagents
+    });
+    const thread = this.codex.startThread(this.getThreadOptions(options.workspacePath, executionPreferences));
+    const input = prependExecutionPolicyHint(options.prompt, executionPreferences);
+    const turn = await thread.run(input);
+    return {
+      sessionId: thread.id ?? undefined,
+      response: turn.finalResponse
+    };
+  }
+
   private getThreadOptions(
     workingDirectory: string,
     runtimePreferences?: RuntimeExecutionPreferences
