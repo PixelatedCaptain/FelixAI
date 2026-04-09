@@ -95,7 +95,7 @@ For a downloaded package install:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.5.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.6.nupkg `
   -Global
 ```
 
@@ -126,13 +126,13 @@ dotnet nuget add source "https://nuget.pkg.github.com/PixelatedCaptain/index.jso
 Then install FelixAI:
 
 ```powershell
-dotnet tool install --global FelixAI.Tool --add-source "felixai-github" --version 0.1.5
+dotnet tool install --global FelixAI.Tool --add-source "felixai-github" --version 0.1.6
 ```
 
 Update FelixAI later with:
 
 ```powershell
-dotnet tool update --global FelixAI.Tool --add-source "felixai-github" --version 0.1.5
+dotnet tool update --global FelixAI.Tool --add-source "felixai-github" --version 0.1.6
 ```
 
 Optional helper-script install from your private feed:
@@ -147,7 +147,7 @@ Optional helper-script install from a downloaded package:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.5.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.6.nupkg `
   -Global
 ```
 

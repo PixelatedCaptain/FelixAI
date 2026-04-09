@@ -33,7 +33,7 @@ Or from a downloaded package:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.5.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.6.nupkg `
   -Global
 ```
 
