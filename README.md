@@ -80,14 +80,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-fr
 
 If the feed requires credentials, set `FELIXAI_NUGET_USERNAME` and `FELIXAI_NUGET_TOKEN` first or pass `-Username` and `-Token`.
 
-For GitHub Packages under `PixelatedCaptain`:
+Recommended internal folder-feed path using OneDrive:
 
 ```powershell
-$env:FELIXAI_GITHUB_PACKAGES_OWNER = "PixelatedCaptain"
-$env:FELIXAI_GITHUB_PACKAGES_USERNAME = "<github-username>"
-$env:FELIXAI_GITHUB_PACKAGES_TOKEN = "<classic-pat>"
+$env:FELIXAI_NUGET_FEED_URL = "C:\Users\PatBreslin\OneDrive - pixelatedpioneers.com\Development\Packages\NuGet"
 
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-github-packages.ps1 `
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
   -Global
 ```
 
@@ -113,34 +111,31 @@ Recommended install flow for teammates:
 1. Add the NuGet source once on the machine.
 2. Install or update FelixAI with `dotnet tool`.
 
-For GitHub Packages under `PixelatedCaptain`, add the source once:
+For the shared OneDrive folder feed, add the source once:
 
 ```powershell
-dotnet nuget add source "https://nuget.pkg.github.com/PixelatedCaptain/index.json" `
-  --name "felixai-github" `
-  --username "<github-username>" `
-  --password "<classic-pat-with-read-packages>" `
-  --store-password-in-clear-text
+dotnet nuget add source "C:\Users\PatBreslin\OneDrive - pixelatedpioneers.com\Development\Packages\NuGet" `
+  --name "felixai-onedrive"
 ```
 
 Then install FelixAI:
 
 ```powershell
-dotnet tool install --global FelixAI.Tool --add-source "felixai-github" --version 0.1.7
+dotnet tool install --global FelixAI.Tool --add-source "felixai-onedrive" --version 0.1.7
 ```
 
 Update FelixAI later with:
 
 ```powershell
-dotnet tool update --global FelixAI.Tool --add-source "felixai-github" --version 0.1.7
+dotnet tool update --global FelixAI.Tool --add-source "felixai-onedrive" --version 0.1.7
 ```
 
-Optional helper-script install from your private feed:
+To publish a new internal package into the shared OneDrive folder feed:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
-  -FeedUrl <your-feed> `
-  -Global
+cd C:\Users\PatBreslin\source\repos\FelixAI
+npm run pack:nuget
+Copy-Item .\tmp\nuget\FelixAI.Tool.0.1.7.nupkg "C:\Users\PatBreslin\OneDrive - pixelatedpioneers.com\Development\Packages\NuGet\"
 ```
 
 Optional helper-script install from a downloaded package:
@@ -153,9 +148,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-fr
 
 If Node is installed in a non-standard location, set `FELIXAI_NODE_EXE` before running `felixai`.
 
-## GitHub Packages
+## Archived GitHub Packages
 
-For a GitHub-hosted private NuGet feed under `PixelatedCaptain`, the feed URL is:
+This path is preserved in case the team returns to GitHub Packages later, but it is no longer the primary recommended distribution method because of package transfer limits.
+
+For a GitHub-hosted private NuGet feed under `PixelatedCaptain`, the feed URL was:
 
 ```text
 https://nuget.pkg.github.com/PixelatedCaptain/index.json

@@ -12,43 +12,40 @@ This guide is for a small private team using FelixAI through the private NuGet p
 
 ## Install and Update
 
-Recommended setup for GitHub Packages under `PixelatedCaptain`:
+Recommended setup for the shared OneDrive folder feed:
 
 1. Add the NuGet source once on the machine:
 
 ```powershell
-dotnet nuget add source "https://nuget.pkg.github.com/PixelatedCaptain/index.json" `
-  --name "felixai-github" `
-  --username "<github-username>" `
-  --password "<classic-pat-with-read-packages>" `
-  --store-password-in-clear-text
+dotnet nuget add source "C:\Users\PatBreslin\OneDrive - pixelatedpioneers.com\Development\Packages\NuGet" `
+  --name "felixai-onedrive"
 ```
 
 2. Install FelixAI:
 
 ```powershell
-dotnet tool install --global FelixAI.Tool --add-source "felixai-github"
+dotnet tool install --global FelixAI.Tool --add-source "felixai-onedrive"
 ```
 
 3. Update FelixAI later with:
 
 ```powershell
-dotnet tool update --global FelixAI.Tool --add-source "felixai-github"
+dotnet tool update --global FelixAI.Tool --add-source "felixai-onedrive"
 ```
 
-Optional helper-script install from a private feed:
+To publish a new internal package into the shared OneDrive folder feed:
+
+```powershell
+cd C:\Users\PatBreslin\source\repos\FelixAI
+npm run pack:nuget
+Copy-Item .\tmp\nuget\FelixAI.Tool.0.1.7.nupkg "C:\Users\PatBreslin\OneDrive - pixelatedpioneers.com\Development\Packages\NuGet\"
+```
+
+Optional helper-script install from the same folder feed:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
-  -FeedUrl <feed-url> `
-  -Global
-```
-
-Optional helper-script update from the same feed:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-feed.ps1 `
-  -FeedUrl <feed-url> `
+  -FeedUrl "C:\Users\PatBreslin\OneDrive - pixelatedpioneers.com\Development\Packages\NuGet" `
   -Global
 ```
 
@@ -66,12 +63,16 @@ Verify the install:
 felixai version
 ```
 
-If you are using a generic private feed instead of GitHub Packages, set these first:
+If you are using a different private feed that requires credentials, set these first:
 
 ```powershell
 $env:FELIXAI_NUGET_USERNAME = "<username>"
 $env:FELIXAI_NUGET_TOKEN = "<token>"
 ```
+
+## Archived GitHub Packages
+
+This path is preserved in case the team returns to GitHub Packages later, but it is no longer the primary recommended distribution method because of package transfer limits.
 
 Optional GitHub Packages helper-script install:
 
