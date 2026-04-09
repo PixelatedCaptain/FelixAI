@@ -11,7 +11,9 @@ import { runDoctor } from "./doctor.js";
 import { assertGitRepository, resolveGitRoot } from "./git.js";
 import { snapshotUnfinishedGitHubIssues } from "./github-issues.js";
 import { initializeProject } from "./init.js";
+import { looksLikeIssueDrivenDirective } from "./issue-directives.js";
 import { IssuePlanner } from "./issue-planner.js";
+import { IssueRunner } from "./issue-runner.js";
 import { saveIssuePlan } from "./issue-state.js";
 import { createJobManager } from "./job-manager.js";
 import { loadRepoAgentsPreferences, saveRepoAgentsPreferences } from "./repo-agents.js";
@@ -35,6 +37,7 @@ Usage:
   felixai config set encourage-subagents <enabled|disabled> [--repo <path>]
   felixai issues snapshot --repo <path> [--json]
   felixai issues plan --repo <path> [--directive "<text>"] [--json]
+  felixai issues run --repo <path> [--directive "<text>"] [--json]
   felixai version
   felixai job start --repo <path> (--task "<large task>" | --task-file <file>) [--base-branch <branch>] [--parallel <n>] [--auto-resume] [--require-clean] [--issue <id>]
   felixai job status <job-id> [--json]
@@ -56,6 +59,8 @@ Examples:
   felixai config set turbo-mode enabled --repo .
   felixai issues snapshot --repo .
   felixai issues plan --repo . --directive "Review unfinished issues and choose the safest implementation order"
+  felixai issues run --repo . --directive "Review unfinished issues and start processing them in dependency order"
+  felixai review all github issues and plan the best order
   felixai job start --repo . --task "Build the next milestone"
   felixai job start --repo . --task-file ./felixai.task.json --parallel 3 --auto-resume
   felixai job start --repo . --task "Refactor auth" --require-clean
@@ -197,6 +202,22 @@ async function resolveRepoRoot(repoPath: string): Promise<string> {
   return resolveGitRoot(repoPath);
 }
 
+async function runNaturalLanguageIssueDirective(command: string, rest: string[]): Promise<void> {
+  const directive = [command, ...rest].join(" ").trim();
+  const repoRoot = await resolveRepoRoot(process.cwd());
+  await ensureRepoModelPreference(repoRoot);
+  const runner = new IssueRunner(repoRoot);
+  const run = await runner.run({ repoRoot, directive });
+  console.log(`[felixai] issue run: ${run.runPath ?? "saved"}`);
+  console.log(`[felixai] status: ${run.status}`);
+  console.log(`[felixai] summary: ${run.summary}`);
+  for (const issue of run.issues) {
+    console.log(
+      `[felixai] issue #${issue.issueNumber}: ${issue.status} jobs=${issue.jobIds.length} parallel_safe=${issue.parallelSafe ? "yes" : "no"} overlap=${issue.overlapRisk}`
+    );
+  }
+}
+
 async function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
     input: process.stdin,
@@ -265,6 +286,10 @@ async function main(): Promise<void> {
   }
 
   const rest = args.slice(1);
+  if (!["init", "auth", "doctor", "config", "issues", "version", "job"].includes(command) && looksLikeIssueDrivenDirective(command, rest)) {
+    await runNaturalLanguageIssueDirective(command, rest);
+    return;
+  }
   const force = hasFlag(rest, "--force");
 
   switch (command) {
@@ -471,8 +496,37 @@ async function main(): Promise<void> {
           }
           return;
         }
+        case "run": {
+          const repoPath = path.resolve(requireValue(getFlagValue(issuesArgs, "--repo"), "Missing --repo value."));
+          const repoRoot = await resolveRepoRoot(repoPath);
+          await ensureRepoModelPreference(repoRoot);
+          const directive =
+            getFlagValue(issuesArgs, "--directive") ??
+            "Review unfinished GitHub issues, determine the safest dependency-aware order, and start processing them.";
+          const runner = new IssueRunner(repoRoot);
+          const run = await runner.run({ repoRoot, directive });
+
+          if (hasFlag(issuesArgs, "--json")) {
+            console.log(JSON.stringify(run, null, 2));
+            return;
+          }
+
+          console.log(`[felixai] issue run saved: ${run.runPath ?? "n/a"}`);
+          console.log(`[felixai] issue run status: ${run.status}`);
+          console.log(`[felixai] issue run summary: ${run.summary}`);
+          console.log(`[felixai] issue snapshot: ${run.snapshotPath}`);
+          console.log(`[felixai] issue plan: ${run.planPath}`);
+          for (const item of run.issues) {
+            console.log(
+              `[felixai] issue #${item.issueNumber}: status=${item.status} jobs=${item.jobIds.length} depends_on=${
+                item.dependsOn.length > 0 ? item.dependsOn.map((issue) => `#${issue}`).join(",") : "none"
+              } parallel_safe=${item.parallelSafe ? "yes" : "no"} overlap=${item.overlapRisk}`
+            );
+          }
+          return;
+        }
         default:
-          throw new Error(`Unknown issues subcommand '${issuesCommand ?? ""}'. Use 'snapshot' or 'plan'.`);
+          throw new Error(`Unknown issues subcommand '${issuesCommand ?? ""}'. Use 'snapshot', 'plan', or 'run'.`);
       }
     }
     case "version": {

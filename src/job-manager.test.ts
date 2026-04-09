@@ -12,7 +12,9 @@ import { pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
 import { normalizeGitHubIssues, snapshotUnfinishedGitHubIssues } from "./github-issues.js";
 import { commitAllChanges, getBranchPushStatus } from "./git.js";
 import { buildPullRequestFailureMessage, createPullRequestWithRunner, hasGitHubTokenPrecedenceConflict } from "./github.js";
+import { looksLikeIssueDrivenDirective } from "./issue-directives.js";
 import { buildIssuePlanningPrompt, validateIssuePlanningResult, type GitHubIssueSnapshotItem } from "./issue-planner.js";
+import { IssueRunner, selectIssueWave } from "./issue-runner.js";
 import { initializeProject } from "./init.js";
 import { createJobManager, JobManager } from "./job-manager.js";
 import { runCommand } from "./process-utils.js";
@@ -30,6 +32,10 @@ async function createFakeWorkspace(root: string, jobId: string, workItemId: stri
     workspacePath,
     branchName: `agent/${workItemId}/job-${jobId.slice(0, 8)}`
   };
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
 }
 
 async function createFakeWorkspaceForIssues(
@@ -239,6 +245,182 @@ async function testNormalizeGitHubIssuesAndSnapshotPersistence(): Promise<void> 
   });
   assert.equal(snapshot.issues.length, 1);
   assert.ok(await pathExists(outputPath));
+}
+
+async function testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues(): Promise<void> {
+  const wave = selectIssueWave([
+    {
+      issueNumber: 38,
+      title: "Scheduler",
+      dependsOn: [],
+      parallelSafe: true,
+      overlapRisk: "low",
+      reasoning: "Independent scheduling change.",
+      status: "pending",
+      jobIds: [],
+      updatedAt: nowIso()
+    },
+    {
+      issueNumber: 39,
+      title: "CLI intake",
+      dependsOn: [],
+      parallelSafe: true,
+      overlapRisk: "low",
+      reasoning: "CLI-only change.",
+      status: "pending",
+      jobIds: [],
+      updatedAt: nowIso()
+    },
+    {
+      issueNumber: 41,
+      title: "Issue repetition",
+      dependsOn: [38],
+      parallelSafe: false,
+      overlapRisk: "high",
+      reasoning: "Depends on scheduler state.",
+      status: "pending",
+      jobIds: [],
+      updatedAt: nowIso()
+    }
+  ]);
+
+  assert.deepEqual(
+    wave.map((issue) => issue.issueNumber),
+    [38, 39]
+  );
+}
+
+async function testIssueRunnerPersistsRunStateAndStopsOnBlockedIssue(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-issue-runner-"));
+  await runCommand("git", ["init", "-b", "main"], { cwd: root });
+  await writeFile(path.join(root, "AGENTS.md"), "model: gpt-5.4\n", "utf8");
+  await ensureFelixDirectories(root);
+
+  const managerFactory = (async () =>
+    ({
+      startJob: async ({ issueRefs }: { issueRefs?: string[] }) =>
+        ({
+          schemaVersion: 1,
+          jobId: `job-${issueRefs?.[0] ?? "none"}`,
+          status: issueRefs?.[0] === "101" ? "completed" : "paused",
+          repoPath: root,
+          repoRoot: root,
+          task: "task",
+          issueRefs: issueRefs ?? [],
+          baseBranch: "main",
+          parallelism: 1,
+          autoResume: true,
+          maxResumesPerItem: 2,
+          planningSummary: "summary",
+          workItems: [
+            {
+              id: "WI-1",
+              title: "work",
+              prompt: "work",
+              issueRefs: issueRefs ?? [],
+              dependsOn: [],
+              status: issueRefs?.[0] === "101" ? "completed" : "blocked",
+              attempts: 1,
+              lastResponse: issueRefs?.[0] === "101" ? "done" : "need operator input",
+              error: issueRefs?.[0] === "101" ? undefined : "need operator input",
+              retryable: true
+            }
+          ],
+          sessions: [],
+          events: [],
+          mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+          mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+          remoteBranches: [],
+          pullRequests: [],
+          issueSummaries: [],
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        }) satisfies JobState
+    })) as unknown as typeof createJobManager;
+
+  const runner = new IssueRunner(
+    root,
+    managerFactory,
+    {
+      snapshotter: async () => ({
+        snapshot: {
+          repoRoot: root,
+          generatedAt: nowIso(),
+          issues: [
+            {
+              id: "I_101",
+              number: 101,
+              title: "Independent issue",
+              body: "Body",
+              bodySummary: "Body",
+              labels: [],
+              assignees: [],
+              state: "OPEN",
+              updatedAt: nowIso(),
+              url: "https://example.test/issues/101"
+            },
+            {
+              id: "I_102",
+              number: 102,
+              title: "Blocked issue",
+              body: "Body",
+              bodySummary: "Body",
+              labels: [],
+              assignees: [],
+              state: "OPEN",
+              updatedAt: nowIso(),
+              url: "https://example.test/issues/102"
+            }
+          ]
+        },
+        outputPath: path.join(root, ".felixai", "state", "issues", "snapshot.json")
+      }),
+      planIssues: async () => ({
+        summary: "Run #101 before #102 if needed.",
+        orderedIssues: [
+          {
+            issueNumber: 101,
+            title: "Independent issue",
+            dependsOn: [],
+            parallelSafe: true,
+            overlapRisk: "low",
+            reasoning: "Safe."
+          },
+          {
+            issueNumber: 102,
+            title: "Blocked issue",
+            dependsOn: [],
+            parallelSafe: true,
+            overlapRisk: "low",
+            reasoning: "Also safe."
+          }
+        ]
+      })
+    }
+  );
+
+  const run = await runner.run({
+    repoRoot: root,
+    directive: "Review unfinished GitHub issues and start processing them."
+  });
+
+  assert.equal(run.status, "paused");
+  assert.equal(run.issues.find((issue) => issue.issueNumber === 101)?.status, "completed");
+  assert.equal(run.issues.find((issue) => issue.issueNumber === 102)?.status, "blocked");
+  assert.ok(await pathExists(path.join(root, ".felixai", "state", "issues")));
+}
+
+async function testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt(): Promise<void> {
+  assert.equal(
+    looksLikeIssueDrivenDirective("review", ["all", "github", "issues", "that", "are", "not", "done"]),
+    true
+  );
+  assert.equal(
+    looksLikeIssueDrivenDirective("review", ["all", "github", "issues", "and", "plan", "the", "best", "order"]),
+    true
+  );
+  assert.equal(looksLikeIssueDrivenDirective("process", ["the", "open", "github", "issues", "in", "dependency", "order"]), true);
+  assert.equal(looksLikeIssueDrivenDirective("version", []), false);
 }
 
 async function testPlanRefinementCollapsesCoupledTestWorkItems(): Promise<void> {
@@ -2394,6 +2576,9 @@ async function main(): Promise<void> {
   await testRepoAgentsPreferencesParseExecutionPolicy();
   await testCliConfigSetPersistsRepoModelAndReasoning();
   await testNormalizeGitHubIssuesAndSnapshotPersistence();
+  await testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues();
+  await testIssueRunnerPersistsRunStateAndStopsOnBlockedIssue();
+  await testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt();
   await testResumeFlow();
   await testLongRunningExecutionPersistsHeartbeatWarning();
   await testInvalidStateFailsValidation();
