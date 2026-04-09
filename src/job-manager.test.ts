@@ -481,20 +481,63 @@ async function testIssueRunnerPersistsRunStateAndStopsOnBlockedIssue(): Promise<
 
 async function testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt(): Promise<void> {
   assert.equal(
-    looksLikeIssueDrivenDirective("review", ["all", "github", "issues", "that", "are", "not", "done"]),
+    looksLikeIssueDrivenDirective(
+      "review",
+      ["all", "github", "issues", "that", "are", "not", "done", "and", "start", "processing", "them"]
+    ),
     true
   );
-  assert.equal(
-    looksLikeIssueDrivenDirective("review", ["all", "github", "issues", "and", "plan", "the", "best", "order"]),
-    true
-  );
+  assert.equal(looksLikeIssueDrivenDirective("review", ["all", "github", "issues", "and", "plan", "the", "best", "order"]), false);
   assert.equal(looksLikeIssueDrivenDirective("process", ["the", "open", "github", "issues", "in", "dependency", "order"]), true);
+  assert.equal(
+    looksLikeIssueDrivenDirective(
+      "figure",
+      ["out", "the", "best", "order", "to", "complete", "unfinished", "issues", "and", "then", "process", "them"]
+    ),
+    true
+  );
   assert.equal(looksLikeIssueDrivenDirective("version", []), false);
 }
 
 async function testClassifyTopLevelInputRoutesKnownCommandsIssuesAndRepoPrompts(): Promise<void> {
   assert.equal(classifyTopLevelInput("version", []), "command");
-  assert.equal(classifyTopLevelInput("review", ["all", "github", "issues"]), "issue");
+  assert.equal(classifyTopLevelInput("review", ["all", "github", "issues"]), "repo");
+  assert.equal(
+    classifyTopLevelInput(
+      "review",
+      ["all", "github", "issues", "that", "are", "not", "done", "and", "start", "processing", "them"]
+    ),
+    "issue"
+  );
+  assert.equal(
+    classifyTopLevelInput(
+      "i",
+      [
+        "want",
+        "you",
+        "to",
+        "review",
+        "the",
+        "github",
+        "issues",
+        "and",
+        "figure",
+        "out",
+        "which",
+        "issues",
+        "are",
+        "for",
+        "app",
+        "features",
+        "and",
+        "which",
+        "are",
+        "infrastructure"
+      ]
+    ),
+    "repo"
+  );
+  assert.equal(classifyTopLevelInput("how", ["many", "issues", "are", "not", "done"]), "repo");
   assert.equal(classifyTopLevelInput("tell", ["me", "about", "this", "repo"]), "repo");
 }
 

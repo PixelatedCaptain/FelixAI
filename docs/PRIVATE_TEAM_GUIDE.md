@@ -56,7 +56,7 @@ If you distribute the `.nupkg` directly instead of using the feed, use:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.6.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.7.nupkg `
   -Global
 ```
 
