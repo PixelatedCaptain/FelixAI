@@ -1,11 +1,42 @@
-import type { FelixConfig } from "./types.js";
-import { CodexAdapter } from "./codex-adapter.js";
-import type { AuthStatus } from "./auth.js";
+import path from "node:path";
+import { readFile } from "node:fs/promises";
 
-export interface CodexModelSupportResult {
-  model: string;
-  supported: boolean;
-  error?: string;
+import { pathExists, readJsonFile } from "./fs-utils.js";
+
+export interface CodexModelCatalogEntry {
+  slug: string;
+  displayName: string;
+  description?: string;
+  defaultReasoningLevel?: string;
+  priority?: number;
+  visibility?: string;
+}
+
+interface CodexModelsCacheFile {
+  models?: Array<{
+    slug?: string;
+    display_name?: string;
+    description?: string;
+    default_reasoning_level?: string;
+    priority?: number;
+    visibility?: string;
+  }>;
+}
+
+function getCodexHome(): string {
+  return path.join(process.env.USERPROFILE ?? process.env.HOME ?? "~", ".codex");
+}
+
+function getModelsCachePath(): string {
+  return path.join(getCodexHome(), "models_cache.json");
+}
+
+function getCodexConfigPath(): string {
+  return path.join(getCodexHome(), "config.toml");
+}
+
+export function normalizeCodexModelSlug(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 export function isUnsupportedCodexModelError(message: string | undefined): boolean {
@@ -16,48 +47,75 @@ export function isUnsupportedCodexModelError(message: string | undefined): boole
   return /model.+not supported/i.test(message) || /invalid_request_error/i.test(message);
 }
 
-export function getCandidateCodexModels(authStatus?: Pick<AuthStatus, "rawStatus">): string[] {
-  const rawStatus = authStatus?.rawStatus?.toLowerCase() ?? "";
-  if (rawStatus.includes("logged in using chatgpt")) {
-    return ["gpt-5.1-codex-max", "gpt-5.1-codex-mini", "codex-mini-latest", "gpt-5-codex", "gpt-5.2-codex"];
+export async function loadCodexModelCatalog(): Promise<CodexModelCatalogEntry[]> {
+  const modelsCachePath = getModelsCachePath();
+  if (!(await pathExists(modelsCachePath))) {
+    return [];
   }
 
-  return ["gpt-5.2-codex", "gpt-5.1-codex-max", "gpt-5.1-codex-mini", "gpt-5-codex", "codex-mini-latest"];
-}
+  const raw = await readJsonFile<CodexModelsCacheFile>(modelsCachePath);
+  const entries = raw.models ?? [];
+  const seen = new Set<string>();
 
-export async function probeCodexModelSupport(
-  config: FelixConfig,
-  repoRoot: string,
-  model: string
-): Promise<CodexModelSupportResult> {
-  const adapter = new CodexAdapter(config);
-  try {
-    await adapter.runPrompt({
-      prompt: "Reply with OK.",
-      workspacePath: repoRoot,
-      model
+  const normalized: CodexModelCatalogEntry[] = [];
+  for (const entry of entries) {
+      const slug = normalizeCodexModelSlug(entry.slug ?? "");
+      if (!slug) {
+        continue;
+      }
+
+      normalized.push({
+        slug,
+        displayName: entry.display_name?.trim() || slug,
+        description: entry.description?.trim() || undefined,
+        defaultReasoningLevel: entry.default_reasoning_level?.trim() || undefined,
+        priority: entry.priority,
+        visibility: entry.visibility?.trim() || undefined
+      });
+  }
+
+  return normalized
+    .filter((entry) => {
+      if (seen.has(entry.slug)) {
+        return false;
+      }
+      seen.add(entry.slug);
+      return true;
+    })
+    .sort((left, right) => {
+      const leftPriority = left.priority ?? Number.MAX_SAFE_INTEGER;
+      const rightPriority = right.priority ?? Number.MAX_SAFE_INTEGER;
+      if (leftPriority !== rightPriority) {
+        return leftPriority - rightPriority;
+      }
+      return left.slug.localeCompare(right.slug);
     });
-    return { model, supported: true };
-  } catch (error) {
-    return {
-      model,
-      supported: false,
-      error: error instanceof Error ? error.message : String(error)
-    };
-  }
 }
 
-export async function discoverSupportedCodexModels(
-  config: FelixConfig,
-  repoRoot: string,
-  authStatus?: Pick<AuthStatus, "rawStatus">
-): Promise<CodexModelSupportResult[]> {
-  const candidates = getCandidateCodexModels(authStatus);
-  const results: CodexModelSupportResult[] = [];
-
-  for (const candidate of candidates) {
-    results.push(await probeCodexModelSupport(config, repoRoot, candidate));
+export async function loadCurrentCodexModel(): Promise<string | undefined> {
+  const configPath = getCodexConfigPath();
+  if (!(await pathExists(configPath))) {
+    return undefined;
   }
 
-  return results;
+  let text = "";
+  try {
+    text = await readFile(configPath, "utf8");
+  } catch {
+    return undefined;
+  }
+  const match = text.match(/^model\s*=\s*"([^"]+)"/im);
+  return match?.[1] ? normalizeCodexModelSlug(match[1]) : undefined;
+}
+
+export function findCodexModelEntry(
+  catalog: CodexModelCatalogEntry[],
+  model: string | undefined
+): CodexModelCatalogEntry | undefined {
+  if (!model) {
+    return undefined;
+  }
+
+  const normalized = normalizeCodexModelSlug(model);
+  return catalog.find((entry) => entry.slug === normalized);
 }

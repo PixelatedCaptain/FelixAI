@@ -131,7 +131,7 @@ felixai job start --repo . --task "Describe the change you want"
 ```
 
 If the repo has a root-level `AGENTS.md`, FelixAI reads it automatically on jobs and uses that guidance for both planning and execution. That file can also set repo defaults like `model:`, `reasoning_effort:`, `turbo_mode:`, and `encourage_subagents:` so FelixAI runs the way that repo expects.
-If the repo does not have a saved model yet, FelixAI probes Codex-compatible candidates for the current login and gives you a numbered model selection list. If the saved `model:` line becomes invalid for the current login, FelixAI prompts for a replacement and updates `AGENTS.md`.
+If the repo does not have a saved model yet, FelixAI reads Codex's local dynamic model catalog from `~/.codex/models_cache.json` and gives you a numbered model selection list. If the saved `model:` line becomes invalid for the current Codex catalog or runtime, FelixAI prompts for a replacement and updates `AGENTS.md`.
 
 Useful options:
 

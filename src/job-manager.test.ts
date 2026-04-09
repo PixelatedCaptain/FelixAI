@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildPlanningPrompt } from "./codex-adapter.js";
 import { DEFAULT_CONFIG, ensureFelixDirectories, loadConfig } from "./config.js";
-import { getCandidateCodexModels, isUnsupportedCodexModelError } from "./codex-models.js";
+import {
+  findCodexModelEntry,
+  isUnsupportedCodexModelError,
+  loadCodexModelCatalog,
+  loadCurrentCodexModel,
+  normalizeCodexModelSlug
+} from "./codex-models.js";
 import { analyzeGitHubAuthStatus } from "./doctor.js";
 import { pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
 import { normalizeGitHubIssues, snapshotUnfinishedGitHubIssues } from "./github-issues.js";
@@ -65,13 +71,56 @@ async function testDefaultReasoningEffortIsMedium(): Promise<void> {
   assert.equal(DEFAULT_CONFIG.codex.modelReasoningEffort, "medium");
 }
 
-async function testCodexModelCandidatesPreferChatgptCompatibleModels(): Promise<void> {
-  const chatgptCandidates = getCandidateCodexModels({ rawStatus: "Logged in using ChatGPT" });
-  assert.equal(chatgptCandidates[0], "gpt-5.1-codex-max");
-  assert.ok(chatgptCandidates.includes("gpt-5.1-codex-mini"));
+async function testCodexModelCatalogLoadsDynamicEntriesAndCurrentModel(): Promise<void> {
+  const originalUserProfile = process.env.USERPROFILE;
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-codex-catalog-"));
+  const codexHome = path.join(root, ".codex");
+  await mkdir(codexHome, { recursive: true });
+  await writeFile(
+    path.join(codexHome, "models_cache.json"),
+    JSON.stringify(
+      {
+        models: [
+          {
+            slug: "gpt-5.4",
+            display_name: "gpt-5.4",
+            description: "Latest frontier agentic coding model.",
+            default_reasoning_level: "medium",
+            priority: 1,
+            visibility: "list"
+          },
+          {
+            slug: "gpt-5.4-mini",
+            display_name: "gpt-5.4-mini",
+            default_reasoning_level: "medium",
+            priority: 2,
+            visibility: "list"
+          }
+        ]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  await writeFile(path.join(codexHome, "config.toml"), 'model = "gpt-5.4"\nmodel_reasoning_effort = "medium"\n', "utf8");
 
-  const defaultCandidates = getCandidateCodexModels({ rawStatus: "Logged in" });
-  assert.equal(defaultCandidates[0], "gpt-5.2-codex");
+  process.env.USERPROFILE = root;
+  try {
+    const catalog = await loadCodexModelCatalog();
+    assert.equal(catalog[0]?.slug, "gpt-5.4");
+    assert.equal(catalog[1]?.slug, "gpt-5.4-mini");
+    assert.equal(await loadCurrentCodexModel(), "gpt-5.4");
+    assert.equal(findCodexModelEntry(catalog, "GPT-5.4")?.slug, "gpt-5.4");
+    assert.equal(normalizeCodexModelSlug(" GPT-5.4 "), "gpt-5.4");
+  } finally {
+    if (originalUserProfile === undefined) {
+      delete process.env.USERPROFILE;
+    } else {
+      process.env.USERPROFILE = originalUserProfile;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 async function testUnsupportedCodexModelErrorDetection(): Promise<void> {
@@ -2589,7 +2638,7 @@ async function testCliStatusHighlightsStaleRunningWorkItems(): Promise<void> {
 async function main(): Promise<void> {
   await testInit();
   await testDefaultReasoningEffortIsMedium();
-  await testCodexModelCandidatesPreferChatgptCompatibleModels();
+  await testCodexModelCatalogLoadsDynamicEntriesAndCurrentModel();
   await testUnsupportedCodexModelErrorDetection();
   await testRunCommandResolvesWindowsCmdShims();
   await testInvalidConfigFailsValidation();
