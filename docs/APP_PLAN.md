@@ -3,6 +3,7 @@
 ## Product definition
 
 FelixAI Orchestrator is a locally installed CLI-driven orchestration engine that coordinates multiple Codex CLI sessions to complete large software engineering tasks in parallel. It is intentionally separate from any relay, dashboard, or remote UI.
+Its target operating model is issue-driven orchestration: FelixAI should be able to review unfinished GitHub issues, ask Codex to propose the safest execution order, and then run one or more Codex sessions per issue until each issue is actually done.
 
 ## Scope
 
@@ -10,7 +11,9 @@ FelixAI Orchestrator is a locally installed CLI-driven orchestration engine that
 
 - Local CLI commands
 - High-level task intake
+- Natural-language task intake
 - Codex-driven task decomposition
+- GitHub issue intake and prioritization
 - Isolated repo workspaces per session
 - Short-lived branch creation per work item
 - Session lifecycle tracking
@@ -75,6 +78,14 @@ FelixAI Orchestrator is a locally installed CLI-driven orchestration engine that
 - error classification
 - packaging polish
 
+### Milestone 8: issue-driven orchestration
+
+- natural-language CLI entry point
+- GitHub unfinished-issue discovery
+- Codex issue ordering and dependency planning
+- parallel-safe issue wave scheduling
+- repeated Codex sessions per issue until done
+
 ## Current implementation status
 
 - `init`: implemented
@@ -95,8 +106,14 @@ FelixAI Orchestrator is a locally installed CLI-driven orchestration engine that
 - merge-candidate automation with persisted conflict state: implemented
 - pull request linkage and issue-aware PR metadata: implemented
 - conflict-resolution workflow on merge candidates: implemented
+- repo-root `AGENTS.md` ingestion for planner/executor prompts: implemented
+- repo-root `AGENTS.md` model and reasoning defaults: implemented
 - direct-to-base merge automation: not yet implemented
 - automatic conflict resolution remains best-effort and operator-reviewed
+- natural-language CLI intake: not yet implemented
+- GitHub unfinished-issue planning and prioritization: not yet implemented
+- issue-driven execution waves based on overlap/dependency analysis: not yet implemented
+- repeated issue execution until issue-done state is reached: not yet implemented
 
 ## Delivery tracking
 
@@ -105,10 +122,13 @@ FelixAI Orchestrator is a locally installed CLI-driven orchestration engine that
 ## Design constraints
 
 - FelixAI orchestrates; Codex plans and executes
+- GitHub issues are the preferred unit of orchestration when a repo uses issue-driven mode
 - each work item gets its own workspace and branch
+- issue-level orchestration should only split an issue into smaller work items when the issue is not already a small, well-defined implementation unit
 - state must survive process restarts
 - relay requirements must not leak into this repo
 - FelixAI must use one explicit Codex credential source per installation with no ambient fallback ambiguity
+- aggressive execution policy such as turbo mode or subagent use should be repo-scoped policy, not hard-coded global behavior
 
 ## Relay boundary
 

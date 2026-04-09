@@ -208,6 +208,47 @@ Prepare FelixAI for repeatable local use and an eventual stable MVP release.
     Scope:
     Document and prototype the path from repo-based usage to installable release artifacts for Windows-focused users.
 
+## Milestone 8: Issue-Driven Orchestration
+
+### Goal
+
+Let FelixAI accept a natural-language directive, review unfinished GitHub issues through Codex, build an execution order, and then drive issue-by-issue Codex execution until the issues are done.
+
+### Exit criteria
+
+- natural-language CLI intake can start an issue-driven orchestration run
+- unfinished GitHub issues can be fetched and summarized locally
+- Codex can return an issue ordering with dependency and overlap guidance
+- FelixAI can schedule parallel-safe issue waves and sequential dependency chains
+- FelixAI can keep resuming an issue until it reaches a done state
+- repo policy can control aggressive execution settings such as turbo mode and subagent use
+
+### Issues
+
+26. Natural-language CLI intake for issue-driven runs
+    Scope:
+    Add a top-level natural-language CLI entry point that can infer the current repo, capture a freeform orchestration directive, and route it into FelixAI without requiring `job start --repo ... --task ...`.
+
+27. GitHub unfinished-issue discovery and local snapshotting
+    Scope:
+    Fetch unfinished GitHub issues for the current repo, normalize the issue data FelixAI needs, and persist an inspectable issue snapshot before planning begins.
+
+28. Codex issue-order planning contract
+    Scope:
+    Define the prompt and schema for asking Codex to review unfinished issues and return an execution order with dependency, overlap-risk, and parallel-safety metadata.
+
+29. Issue-wave scheduler for dependency-aware parallel execution
+    Scope:
+    Schedule issue execution in safe parallel waves when issues do not overlap, and force sequential processing when Codex marks dependency or overlap risk.
+
+30. Repeated issue execution until done
+    Scope:
+    Treat a GitHub issue as the durable orchestration unit and keep resuming or reissuing Codex sessions for that issue until FelixAI determines the issue is actually done.
+
+31. Repo-scoped execution policy in AGENTS.md
+    Scope:
+    Extend repo-root `AGENTS.md` handling so repos can opt into aggressive execution settings such as turbo mode and subagent encouragement without hard-coding those policies globally.
+
 ## Notes
 
 - Merge automation, conflict resolution automation, and relay implementation remain outside the current completed scope.
