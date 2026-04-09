@@ -56,6 +56,24 @@ async function testDefaultReasoningEffortIsMedium(): Promise<void> {
   assert.equal(DEFAULT_CONFIG.codex.modelReasoningEffort, "medium");
 }
 
+async function testRunCommandResolvesWindowsCmdShims(): Promise<void> {
+  if (process.platform !== "win32") {
+    return;
+  }
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-cmd-shim-"));
+  const shimPath = path.join(root, "felix-shim.cmd");
+  await writeFile(shimPath, "@echo off\r\necho shim-ok %1\r\n", "utf8");
+
+  const env = {
+    ...process.env,
+    PATH: `${root};${process.env.PATH ?? ""}`
+  };
+
+  const result = await runCommand("felix-shim", ["value"], { env });
+  assert.match(result.stdout, /shim-ok value/i);
+}
+
 async function testInvalidConfigFailsValidation(): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "felix-config-"));
   await ensureFelixDirectories(root);
@@ -2237,6 +2255,7 @@ async function testCliStatusHighlightsStaleRunningWorkItems(): Promise<void> {
 async function main(): Promise<void> {
   await testInit();
   await testDefaultReasoningEffortIsMedium();
+  await testRunCommandResolvesWindowsCmdShims();
   await testInvalidConfigFailsValidation();
   await testLegacyCredentialModesMigrateToCodex();
   await testPlanningPromptDiscouragesVerificationOnlyWorkItems();

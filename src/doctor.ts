@@ -101,8 +101,12 @@ export async function runDoctor(repoPath = process.cwd()): Promise<DoctorReport>
   const codexAuth = await getCodexAuthStatus();
   checks.push({
     id: "codex-auth",
-    status: codexAuth.loggedIn ? "ok" : "warn",
-    summary: codexAuth.loggedIn ? "Codex login is active." : "Codex login is not active.",
+    status: !codex.ok ? "warn" : codexAuth.loggedIn ? "ok" : "warn",
+    summary: !codex.ok
+      ? "Codex auth could not be verified because the Codex CLI is not available."
+      : codexAuth.loggedIn
+        ? "Codex login is active."
+        : "Codex login is not active.",
     detail: codexAuth.rawStatus || codexAuth.authFilePath
   });
 
