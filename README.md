@@ -95,7 +95,7 @@ For a downloaded package install:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.0.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.1.nupkg `
   -Global
 ```
 
@@ -147,7 +147,7 @@ Optional helper-script install from a downloaded package:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.0.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.1.nupkg `
   -Global
 ```
 
