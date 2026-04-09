@@ -149,6 +149,51 @@ export async function getGitHubCliStatus(repoPath: string): Promise<string | und
   return getGitHubCliStatusWithRunner(repoPath, runCommand);
 }
 
+export async function listGitHubLabels(repoPath: string): Promise<string[]> {
+  const result = await runGitHubCli(repoPath, ["label", "list", "--limit", "200", "--json", "name"]);
+  const parsed = JSON.parse(result.stdout) as Array<{ name?: string }>;
+  return parsed.map((entry) => entry.name?.trim()).filter((value): value is string => Boolean(value));
+}
+
+export async function ensureGitHubLabel(options: {
+  repoPath: string;
+  name: string;
+  color: string;
+  description: string;
+}): Promise<void> {
+  const existing = await listGitHubLabels(options.repoPath);
+  if (existing.includes(options.name)) {
+    return;
+  }
+
+  await runGitHubCli(options.repoPath, [
+    "label",
+    "create",
+    options.name,
+    "--color",
+    options.color,
+    "--description",
+    options.description
+  ]);
+}
+
+export async function addLabelsToGitHubIssue(options: {
+  repoPath: string;
+  issueNumber: number;
+  labels: string[];
+}): Promise<void> {
+  if (options.labels.length === 0) {
+    return;
+  }
+
+  const args = ["issue", "edit", String(options.issueNumber)];
+  for (const label of options.labels) {
+    args.push("--add-label", label);
+  }
+
+  await runGitHubCli(options.repoPath, args);
+}
+
 export async function getGitHubCliStatusWithRunner(repoPath: string, runner: typeof runCommand): Promise<string | undefined> {
   try {
     const result = await runner("gh", ["auth", "status"], { cwd: repoPath });

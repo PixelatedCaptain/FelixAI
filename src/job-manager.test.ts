@@ -19,7 +19,8 @@ import { pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
 import { normalizeGitHubIssues, snapshotUnfinishedGitHubIssues } from "./github-issues.js";
 import { commitAllChanges, getBranchPushStatus } from "./git.js";
 import { buildPullRequestFailureMessage, createPullRequestWithRunner, hasGitHubTokenPrecedenceConflict } from "./github.js";
-import { classifyTopLevelInput, looksLikeIssueDrivenDirective } from "./issue-directives.js";
+import { classifyTopLevelInput, looksLikeIssueDrivenDirective, looksLikeIssueLabelingDirective } from "./issue-directives.js";
+import { buildIssueLabelingPrompt, validateIssueLabelingResult } from "./issue-labeler.js";
 import { buildIssuePlanningPrompt, validateIssuePlanningResult, type GitHubIssueSnapshotItem } from "./issue-planner.js";
 import { IssueRunner, selectIssueWave } from "./issue-runner.js";
 import { initializeProject } from "./init.js";
@@ -287,6 +288,100 @@ async function testIssuePlanningPromptAndValidation(): Promise<void> {
   );
 }
 
+async function testIssueLabelingPromptAndValidation(): Promise<void> {
+  const issues: GitHubIssueSnapshotItem[] = [
+    {
+      number: 44,
+      title: "Finalize launch docs",
+      body: "Close docs gaps for launch readiness.",
+      labels: [],
+      assignees: [],
+      state: "OPEN",
+      updatedAt: "2026-04-09T00:00:00Z",
+      url: "https://github.com/example/repo/issues/44"
+    },
+    {
+      number: 45,
+      title: "Harden worker reliability",
+      body: "Improve worker restart and retry behavior.",
+      labels: [],
+      assignees: [],
+      state: "OPEN",
+      updatedAt: "2026-04-09T00:00:00Z",
+      url: "https://github.com/example/repo/issues/45"
+    }
+  ];
+
+  const prompt = buildIssueLabelingPrompt({
+    directive: "Review the GitHub issues, label app readiness versus infrastructure readiness, and report back.",
+    repoRoot: "C:\\repo",
+    issues
+  });
+  assert.match(prompt, /GitHub issue labeling session for FelixAI Orchestrator/i);
+  assert.match(prompt, /Return a compact label set and an assignment entry for every issue/i);
+
+  const validated = validateIssueLabelingResult(
+    {
+      summary: "Applied readiness labels.",
+      labels: [
+        {
+          name: "app-readiness",
+          description: "Tracks application feature and launch-readiness work.",
+          color: "1d76db"
+        },
+        {
+          name: "infrastructure-readiness",
+          description: "Tracks platform and hosting readiness work.",
+          color: "d97706"
+        }
+      ],
+      assignments: [
+        {
+          issueNumber: 44,
+          title: "Finalize launch docs",
+          labels: ["app-readiness"],
+          reasoning: "Direct launch-facing product readiness work."
+        },
+        {
+          issueNumber: 45,
+          title: "Harden worker reliability",
+          labels: ["infrastructure-readiness"],
+          reasoning: "Worker reliability is infrastructure-oriented."
+        }
+      ]
+    },
+    issues
+  );
+  assert.equal(validated.assignments.length, 2);
+
+  await assert.rejects(
+    Promise.resolve().then(() =>
+      validateIssueLabelingResult(
+        {
+          summary: "Broken",
+          labels: [
+            {
+              name: "App Readiness",
+              description: "bad",
+              color: "1d76db"
+            }
+          ],
+          assignments: [
+            {
+              issueNumber: 44,
+              title: "Finalize launch docs",
+              labels: ["App Readiness"],
+              reasoning: "bad"
+            }
+          ]
+        },
+        issues
+      )
+    ),
+    /invalid label name/i
+  );
+}
+
 async function testNormalizeGitHubIssuesAndSnapshotPersistence(): Promise<void> {
   const normalized = normalizeGitHubIssues([
     {
@@ -499,6 +594,17 @@ async function testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt(): Prom
   assert.equal(looksLikeIssueDrivenDirective("version", []), false);
 }
 
+async function testLooksLikeIssueLabelingDirectiveDetectsLabelWork(): Promise<void> {
+  assert.equal(
+    looksLikeIssueLabelingDirective(
+      "i",
+      ["want", "you", "to", "review", "the", "github", "issues", "and", "add", "labels", "for", "app", "readiness"]
+    ),
+    true
+  );
+  assert.equal(looksLikeIssueLabelingDirective("how", ["many", "issues", "are", "not", "done"]), false);
+}
+
 async function testClassifyTopLevelInputRoutesKnownCommandsIssuesAndRepoPrompts(): Promise<void> {
   assert.equal(classifyTopLevelInput("version", []), "command");
   assert.equal(classifyTopLevelInput("review", ["all", "github", "issues"]), "repo");
@@ -536,6 +642,13 @@ async function testClassifyTopLevelInputRoutesKnownCommandsIssuesAndRepoPrompts(
       ]
     ),
     "repo"
+  );
+  assert.equal(
+    classifyTopLevelInput(
+      "i",
+      ["want", "you", "to", "review", "the", "github", "issues", "and", "add", "labels", "for", "app", "readiness"]
+    ),
+    "issue_labels"
   );
   assert.equal(classifyTopLevelInput("how", ["many", "issues", "are", "not", "done"]), "repo");
   assert.equal(classifyTopLevelInput("tell", ["me", "about", "this", "repo"]), "repo");
@@ -2688,6 +2801,7 @@ async function main(): Promise<void> {
   await testLegacyCredentialModesMigrateToCodex();
   await testPlanningPromptDiscouragesVerificationOnlyWorkItems();
   await testIssuePlanningPromptAndValidation();
+  await testIssueLabelingPromptAndValidation();
   await testPlanRefinementCollapsesCoupledTestWorkItems();
   await testPlanRefinementKeepsIndependentWorkItemsSplit();
   await testPlannerAndExecutionFlow();
@@ -2699,6 +2813,7 @@ async function main(): Promise<void> {
   await testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues();
   await testIssueRunnerPersistsRunStateAndStopsOnBlockedIssue();
   await testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt();
+  await testLooksLikeIssueLabelingDirectiveDetectsLabelWork();
   await testClassifyTopLevelInputRoutesKnownCommandsIssuesAndRepoPrompts();
   await testResumeFlow();
   await testLongRunningExecutionPersistsHeartbeatWarning();

@@ -18,7 +18,9 @@ import {
 import { runDoctor } from "./doctor.js";
 import { assertGitRepository, resolveGitRoot } from "./git.js";
 import { snapshotUnfinishedGitHubIssues } from "./github-issues.js";
+import { addLabelsToGitHubIssue, ensureGitHubLabel } from "./github.js";
 import { initializeProject } from "./init.js";
+import { IssueLabeler } from "./issue-labeler.js";
 import { classifyTopLevelInput } from "./issue-directives.js";
 import { IssuePlanner } from "./issue-planner.js";
 import { IssueRunner } from "./issue-runner.js";
@@ -222,6 +224,51 @@ async function runNaturalLanguageIssueDirective(command: string, rest: string[])
   for (const issue of run.issues) {
     console.log(
       `[felixai] issue #${issue.issueNumber}: ${issue.status} jobs=${issue.jobIds.length} parallel_safe=${issue.parallelSafe ? "yes" : "no"} overlap=${issue.overlapRisk}`
+    );
+  }
+}
+
+async function runNaturalLanguageIssueLabelingDirective(command: string, rest: string[]): Promise<void> {
+  const directive = [command, ...rest].join(" ").trim();
+  const repoRoot = await resolveRepoRoot(process.cwd());
+  await ensureRepoModelPreference(repoRoot);
+  const { snapshot } = await snapshotUnfinishedGitHubIssues(repoRoot, repoRoot);
+  const config = await loadConfig(repoRoot);
+  const repoPreferences = await loadRepoAgentsPreferences(repoRoot);
+  const labeler = new IssueLabeler(config);
+  const plan = await labeler.createLabelingPlan({
+    directive,
+    repoRoot,
+    issues: snapshot.issues,
+    model: repoPreferences?.model,
+    modelReasoningEffort: repoPreferences?.reasoningEffort,
+    turboMode: repoPreferences?.turboMode,
+    encourageSubagents: repoPreferences?.encourageSubagents
+  });
+
+  for (const label of plan.result.labels) {
+    await ensureGitHubLabel({
+      repoPath: repoRoot,
+      name: label.name,
+      color: label.color,
+      description: label.description
+    });
+  }
+
+  console.log(`[felixai] session: ${plan.sessionId ?? "n/a"}`);
+  console.log(plan.result.summary);
+
+  for (const assignment of plan.result.assignments) {
+    const existing = snapshot.issues.find((issue) => issue.number === assignment.issueNumber)?.labels ?? [];
+    const labelsToAdd = assignment.labels.filter((label) => !existing.includes(label));
+    await addLabelsToGitHubIssue({
+      repoPath: repoRoot,
+      issueNumber: assignment.issueNumber,
+      labels: labelsToAdd
+    });
+
+    console.log(
+      `[felixai] issue #${assignment.issueNumber}: ${assignment.title} -> ${assignment.labels.length > 0 ? assignment.labels.join(", ") : "no labels"}`
     );
   }
 }
@@ -438,6 +485,10 @@ async function main(): Promise<void> {
 
   const rest = args.slice(1);
   const inputClass = classifyTopLevelInput(command, rest);
+  if (inputClass === "issue_labels") {
+    await runNaturalLanguageIssueLabelingDirective(command, rest);
+    return;
+  }
   if (inputClass === "issue") {
     await runNaturalLanguageIssueDirective(command, rest);
     return;

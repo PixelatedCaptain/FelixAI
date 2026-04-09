@@ -93,7 +93,7 @@ For a downloaded package install:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.7.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.8.nupkg `
   -Global
 ```
 
@@ -121,13 +121,13 @@ dotnet nuget add source "C:\Users\PatBreslin\OneDrive - pixelatedpioneers.com\De
 Then install FelixAI:
 
 ```powershell
-dotnet tool install --global FelixAI.Tool --add-source "felixai-onedrive" --version 0.1.7
+dotnet tool install --global FelixAI.Tool --add-source "felixai-onedrive" --version 0.1.8
 ```
 
 Update FelixAI later with:
 
 ```powershell
-dotnet tool update --global FelixAI.Tool --add-source "felixai-onedrive" --version 0.1.7
+dotnet tool update --global FelixAI.Tool --add-source "felixai-onedrive" --version 0.1.8
 ```
 
 To publish a new internal package into the shared OneDrive folder feed:
@@ -135,14 +135,14 @@ To publish a new internal package into the shared OneDrive folder feed:
 ```powershell
 cd C:\Users\PatBreslin\source\repos\FelixAI
 npm run pack:nuget
-Copy-Item .\tmp\nuget\FelixAI.Tool.0.1.7.nupkg "C:\Users\PatBreslin\OneDrive - pixelatedpioneers.com\Development\Packages\NuGet\"
+Copy-Item .\tmp\nuget\FelixAI.Tool.0.1.8.nupkg "C:\Users\PatBreslin\OneDrive - pixelatedpioneers.com\Development\Packages\NuGet\"
 ```
 
 Optional helper-script install from a downloaded package:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-felixai-from-package.ps1 `
-  -PackagePath .\FelixAI.Tool.0.1.7.nupkg `
+  -PackagePath .\FelixAI.Tool.0.1.8.nupkg `
   -Global
 ```
 
@@ -275,12 +275,14 @@ felixai issues snapshot --repo .
 felixai issues plan --repo . --directive "Review unfinished issues and choose the safest implementation order"
 felixai issues run --repo . --directive "Review unfinished issues and start processing them in dependency order"
 felixai review all github issues that are not done and figure out the best order to complete them, then start processing them
+felixai review the github issues, add app-readiness and infrastructure-readiness labels, and report the results
 felixai tell me about this repo
 ```
 
 Issue snapshots, issue plans, and issue-run state are persisted under `.felixai/state/issues/`.
 
 For non-orchestration prompts, FelixAI now falls back to a single Codex repo session and returns the result directly.
+For issue-labeling prompts, Codex returns the label plan and Felix applies the GitHub label mutations itself through the local `gh` CLI.
 
 ## GitHub alignment
 
