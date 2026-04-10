@@ -8,6 +8,7 @@ FelixAI Orchestrator is a local CLI-driven orchestration engine for GitHub issue
 - Reads prepared GitHub issues as the execution contract
 - Creates isolated Git workspaces and short-lived branches per issue session
 - Launches Codex sessions against those isolated workspaces
+- Uses a two-phase issue lifecycle: implementation first, then validation/testing
 - Persists job, session, and event state under `.felixai/state`
 - Supports issue-level retries and manual intervention
 - Distinguishes resume boundaries from blocked/manual-review execution results
@@ -282,6 +283,10 @@ felixai issues run --repo . --directive "Start processing the prepared GitHub is
 Issue snapshots, issue plans, and issue-run state are persisted under `.felixai/state/issues/`.
 
 FelixAI is most reliable when the repo already has a prepared app plan expressed as well-structured GitHub issues with clear execution metadata, dependencies, and done criteria.
+Issue execution now expects a simple lifecycle:
+
+- implementation sessions do the work and add `ready-to-test` when the issue is ready for focused validation
+- validation sessions add missing focused tests if needed, run the relevant tests, and then move the issue to `done`
 
 ## GitHub alignment
 

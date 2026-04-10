@@ -13,7 +13,7 @@
     <PackageTags>felixai;codex;cli;orchestration</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageOutputPath>..\..\tmp\nuget</PackageOutputPath>
-    <Version>0.1.21</Version>
+    <Version>0.1.22</Version>
     <AssemblyName>FelixAI.Tool</AssemblyName>
   </PropertyGroup>
 

@@ -207,6 +207,36 @@ export async function addLabelsToGitHubIssue(options: {
   await runGitHubCli(options.repoPath, args);
 }
 
+export async function removeLabelsFromGitHubIssue(options: {
+  repoPath: string;
+  issueNumber: number;
+  labels: string[];
+}): Promise<void> {
+  if (options.labels.length === 0) {
+    return;
+  }
+
+  const args = ["issue", "edit", String(options.issueNumber)];
+  for (const label of options.labels) {
+    args.push("--remove-label", label);
+  }
+
+  await runGitHubCli(options.repoPath, args);
+}
+
+export async function closeGitHubIssue(options: {
+  repoPath: string;
+  issueNumber: number;
+  comment?: string;
+}): Promise<void> {
+  const args = ["issue", "close", String(options.issueNumber)];
+  if (options.comment?.trim()) {
+    args.push("--comment", options.comment.trim());
+  }
+
+  await runGitHubCli(options.repoPath, args);
+}
+
 export async function getGitHubCliStatusWithRunner(repoPath: string, runner: typeof runCommand): Promise<string | undefined> {
   try {
     const result = await runner("gh", ["auth", "status"], { cwd: repoPath });

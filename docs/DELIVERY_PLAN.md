@@ -144,9 +144,13 @@ Make issue retries and done-state checks operationally trustworthy.
 
 17. Done-state checking against GitHub issue state
     Scope:
-    After each issue session, check whether the issue is actually done using GitHub closure and documented done criteria, and continue or stop accordingly.
+    After each issue session, check whether the issue is actually done using GitHub closure, `done`/`ready-to-test` lifecycle labels, and documented done criteria, and continue or stop accordingly.
 
-18. Manual intervention and restart UX
+18. Two-phase issue lifecycle with validation handoff
+    Scope:
+    Use implementation sessions to move issues to `ready-to-test`, then run separate validation sessions that add missing focused tests, run relevant test coverage, and only then move issues to `done`.
+
+19. Manual intervention and restart UX
     Scope:
     Improve operator messaging so it is obvious when Felix is continuing the same issue, starting a fresh issue session, or waiting for manual intervention.
 
@@ -165,15 +169,15 @@ Make completed task branches reviewable and ready for human-controlled integrati
 
 ### Issues
 
-19. Merge-readiness model and summaries
+20. Merge-readiness model and summaries
     Scope:
     Expand the current completed/pending branch tracking into a richer merge-readiness summary with job-level reporting.
 
-20. GitHub issue and branch traceability metadata
+21. GitHub issue and branch traceability metadata
     Scope:
     Add optional issue references and persist branch-to-task traceability so future relay/GitHub workflows can align naturally.
 
-21. Conflict detection and operator surfacing
+22. Conflict detection and operator surfacing
     Scope:
     Detect likely merge conflicts or integration blockers and surface them clearly in state, logs, and CLI output.
 
@@ -192,19 +196,19 @@ Prepare FelixAI for repeatable local use and an eventual stable MVP release.
 
 ### Issues
 
-22. Test coverage expansion for planner, scheduler, workspace, and resume flows
+23. Test coverage expansion for planner, scheduler, workspace, and resume flows
     Scope:
     Add broader tests for dependency handling, invalid plans, workspace failures, resume boundaries, and config/state validation.
 
-23. Version reporting and compatibility surface
+24. Version reporting and compatibility surface
     Scope:
     Expose FelixAI version, config schema version, and state schema version in a stable CLI-visible form.
 
-24. Config and status inspection commands
+25. Config and status inspection commands
     Scope:
     Add commands such as `felixai config show` and a machine-readable status output that future relay code can consume.
 
-25. Installation and release packaging plan
+26. Installation and release packaging plan
     Scope:
     Document and prototype the path from repo-based usage to installable release artifacts for Windows-focused users.
 
@@ -224,27 +228,27 @@ Let FelixAI accept an external app plan expressed as well-structured GitHub issu
 
 ### Issues
 
-26. Replace mixed natural-language planning flows with explicit issue orchestration entry
+27. Replace mixed natural-language planning flows with explicit issue orchestration entry
     Scope:
     Narrow Felix input handling so the primary path is explicit issue orchestration against prepared GitHub issues, not freeform product planning or recommendation chat.
 
-27. GitHub unfinished-issue discovery and local snapshotting
+28. GitHub unfinished-issue discovery and local snapshotting
     Scope:
     Fetch unfinished GitHub issues for the current repo, normalize the issue data FelixAI needs, and persist an inspectable issue snapshot before planning begins.
 
-28. Dependency-aware issue wave scheduler from metadata
+29. Dependency-aware issue wave scheduler from metadata
     Scope:
     Build the scheduler around issue metadata and explicit dependencies so independent issues can run in parallel and ordered issues wait correctly.
 
-29. Felix shell/operator model for busy execution plus secondary-shell monitoring
+30. Felix shell/operator model for busy execution plus secondary-shell monitoring
     Scope:
     Make the main shell intentionally busy during active execution and ensure `job list`, `job status`, and `job watch` in a second shell are reliable and easy to interpret.
 
-30. Repeated issue execution until done
+31. Repeated issue execution until done
     Scope:
     Treat a GitHub issue as the durable orchestration unit and keep reissuing Codex CLI sessions for that issue until FelixAI determines the issue is actually done.
 
-31. Repo-scoped execution policy in AGENTS.md
+32. Repo-scoped execution policy in AGENTS.md
     Scope:
     Extend repo-root `AGENTS.md` handling so repos can opt into aggressive execution settings such as turbo mode and subagent encouragement without hard-coding those policies globally.
 

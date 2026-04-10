@@ -13,6 +13,7 @@ Its target operating model is issue-driven execution, not product planning: an a
 - GitHub issue intake and execution orchestration
 - GitHub issue dependency and parallel-safety scheduling
 - Repeated Codex CLI sessions per issue until done
+- Two-phase issue lifecycle with implementation then validation/testing
 - Isolated repo workspaces per issue session
 - Short-lived branch creation per issue session
 - Session lifecycle tracking
@@ -67,6 +68,7 @@ Its target operating model is issue-driven execution, not product planning: an a
 - classify completion vs retry vs blocked
 - continue running issue sessions until issue-done state is reached
 - keep operator-controlled manual intervention available
+- move issues through `ready-to-test` before final done/closure
 
 ### Milestone 6: merge readiness
 
@@ -113,11 +115,12 @@ Its target operating model is issue-driven execution, not product planning: an a
 - direct-to-base merge automation: not yet implemented
 - automatic conflict resolution remains best-effort and operator-reviewed
 - external app-plan preparation: required and intentionally outside FelixAI
-- GitHub issue metadata contract for dependency/order/parallel safety: not yet implemented
-- issue-driven execution waves based on overlap/dependency analysis: partially implemented
-- repeated issue execution until issue-done state is reached: partially implemented
-- real Codex CLI parity for issue execution sessions: not yet implemented
-- done-state checking against GitHub issue closure/body contract: not yet implemented
+- GitHub issue metadata contract for dependency/order/parallel safety: implemented
+- issue-driven execution waves based on overlap/dependency analysis: implemented
+- repeated issue execution until issue-done state is reached: implemented
+- real Codex CLI parity for issue execution sessions: implemented for issue execution
+- two-phase implementation/validation issue lifecycle: implemented
+- done-state checking against GitHub issue closure/body contract: implemented
 
 ## Delivery tracking
 
@@ -129,6 +132,7 @@ Its target operating model is issue-driven execution, not product planning: an a
 - product and app planning are prepared outside FelixAI
 - GitHub issues are the primary unit of orchestration
 - issue-level metadata, not freeform prompt interpretation, should drive ordering and parallel safety
+- implementation sessions should mark issues `ready-to-test`; validation sessions should add `done` and close/move the issue when tests pass
 - each issue session gets its own workspace and branch
 - state must survive process restarts
 - relay requirements must not leak into this repo

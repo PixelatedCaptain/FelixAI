@@ -470,6 +470,7 @@ async function testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues(): Prom
       issueNumber: 38,
       title: "Scheduler",
       lane: "ready-parallel",
+      phase: "implementation",
       dependsOn: [],
       parallelSafe: true,
       overlapRisk: "low",
@@ -482,6 +483,7 @@ async function testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues(): Prom
       issueNumber: 39,
       title: "CLI intake",
       lane: "ready-parallel",
+      phase: "implementation",
       dependsOn: [],
       parallelSafe: true,
       overlapRisk: "low",
@@ -494,6 +496,7 @@ async function testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues(): Prom
       issueNumber: 41,
       title: "Issue repetition",
       lane: "ordered",
+      phase: "implementation",
       dependsOn: [38],
       parallelSafe: false,
       overlapRisk: "high",
@@ -630,7 +633,8 @@ async function testIssueRunnerPersistsRunStateAndStopsOnBlockedIssue(): Promise<
           doneChecklistCompletedCount: issueNumber === 101 ? 1 : 0,
           validationErrors: []
         }
-      })
+      }),
+      ensureLabel: async () => {}
     }
   );
 
@@ -746,7 +750,8 @@ async function testIssueRunnerDoesNotRetryBlockedJobs(): Promise<void> {
           doneChecklistCompletedCount: 0,
           validationErrors: []
         }
-      })
+      }),
+      ensureLabel: async () => {}
   });
 
   const run = await runner.run({
@@ -949,7 +954,8 @@ async function testIssueRunnerFiltersToExplicitIssuesAndStopsAfterFirstRequested
           doneChecklistCompletedCount: issueNumber === 144 ? 1 : 0,
           validationErrors: []
         }
-      })
+      }),
+      ensureLabel: async () => {}
   });
 
   const run = await runner.run({
@@ -962,6 +968,148 @@ async function testIssueRunnerFiltersToExplicitIssuesAndStopsAfterFirstRequested
   assert.equal(run.issues.find((issue) => issue.issueNumber === 144)?.status, "completed");
   assert.equal(run.issues.find((issue) => issue.issueNumber === 138)?.status, "pending");
   assert.match(run.summary, /First matching issue implemented/i);
+}
+
+async function testIssueRunnerTransitionsFromImplementationToValidationPhase(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-issue-phase-"));
+  await runCommand("git", ["init", "-b", "main"], { cwd: root });
+  await writeFile(path.join(root, "AGENTS.md"), "model: gpt-5.4\n", "utf8");
+  await ensureFelixDirectories(root);
+
+  const tasks: string[] = [];
+  const managerFactory = (async () =>
+    ({
+      startJob: async ({ task, issueRefs }: { task: string; issueRefs?: string[] }) => {
+        tasks.push(task);
+        return {
+          schemaVersion: 1,
+          jobId: `job-${tasks.length}`,
+          status: "completed",
+          repoPath: root,
+          repoRoot: root,
+          task,
+          issueRefs: issueRefs ?? [],
+          baseBranch: "main",
+          parallelism: 1,
+          autoResume: false,
+          maxResumesPerItem: 2,
+          planningSummary: "summary",
+          workItems: [
+            {
+              id: "WI-1",
+              title: "phase work",
+              prompt: task,
+              issueRefs: issueRefs ?? [],
+              dependsOn: [],
+              status: "completed",
+              attempts: 1,
+              lastResponse: "done"
+            }
+          ],
+          sessions: [],
+          events: [],
+          mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+          mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+          remoteBranches: [],
+          pullRequests: [],
+          issueSummaries: [],
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        } satisfies JobState;
+      }
+    })) as unknown as typeof createJobManager;
+
+  let fetchCount = 0;
+  const runner = new IssueRunner(root, managerFactory, {
+    snapshotter: async () => ({
+      snapshot: {
+        repoRoot: root,
+        generatedAt: nowIso(),
+        issues: [
+          {
+            id: "I_109",
+            number: 109,
+            title: "Two phase issue",
+            body: "## Summary\nBody\n\n## Execution Metadata\n- Lane: ordered\n- Depends on: none\n- Parallel-safe: no\n\n## Done Criteria\n- [ ] done",
+            bodySummary: "Body",
+            labels: ["app-ready"],
+            assignees: [],
+            state: "OPEN",
+            updatedAt: nowIso(),
+            url: "https://example.test/issues/109",
+            executionMetadata: {
+              lane: "ordered",
+              dependsOn: [],
+              parallelSafe: false,
+              doneChecklistCount: 1,
+              doneChecklistCompletedCount: 0,
+              validationErrors: []
+            }
+          }
+        ]
+      },
+      outputPath: path.join(root, ".felixai", "state", "issues", "snapshot.json")
+    }),
+    fetchIssue: async () => {
+      fetchCount += 1;
+      if (fetchCount === 1) {
+        return {
+          id: "I_109",
+          number: 109,
+          title: "Two phase issue",
+          body: "## Done Criteria\n- [ ] done",
+          bodySummary: "Body",
+          labels: ["app-ready", "ready-to-test"],
+          assignees: [],
+          state: "OPEN",
+          updatedAt: nowIso(),
+          url: "https://example.test/issues/109",
+          executionMetadata: {
+            lane: "ordered",
+            dependsOn: [],
+            parallelSafe: false,
+            doneChecklistCount: 1,
+            doneChecklistCompletedCount: 0,
+            validationErrors: []
+          }
+        };
+      }
+
+      return {
+        id: "I_109",
+        number: 109,
+        title: "Two phase issue",
+        body: "## Done Criteria\n- [ ] done",
+        bodySummary: "Body",
+        labels: ["app-ready", "done"],
+        assignees: [],
+        state: "OPEN",
+        updatedAt: nowIso(),
+        url: "https://example.test/issues/109",
+        executionMetadata: {
+          lane: "ordered",
+          dependsOn: [],
+          parallelSafe: false,
+          doneChecklistCount: 1,
+          doneChecklistCompletedCount: 0,
+          validationErrors: []
+        }
+      };
+    },
+    ensureLabel: async () => {}
+  });
+
+  const run = await runner.run({
+    repoRoot: root,
+    directive: "implement github issue #109"
+  });
+
+  assert.equal(run.status, "completed");
+  assert.equal(tasks.length, 2);
+  assert.match(tasks[0]!, /Execution phase: implementation/);
+  assert.match(tasks[0]!, /add the GitHub label `ready-to-test`/);
+  assert.match(tasks[1]!, /Execution phase: validation/);
+  assert.match(tasks[1]!, /add the `done` label, and close or move the issue to done/i);
 }
 
 async function testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt(): Promise<void> {
@@ -3704,6 +3852,7 @@ async function main(): Promise<void> {
   await testIssueRunnerDoesNotRetryBlockedJobs();
   await testCodexSessionTranscriptDiscoveryAndFormatting();
   await testIssueRunnerFiltersToExplicitIssuesAndStopsAfterFirstRequestedImplementation();
+  await testIssueRunnerTransitionsFromImplementationToValidationPhase();
   await testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt();
   await testLooksLikePlanThenExecuteDirectiveDetectsMixedIntent();
   await testLooksLikeIssueLabelingDirectiveDetectsLabelWork();

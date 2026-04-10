@@ -4,6 +4,7 @@ import {
   type GitHubIssueExecutionLane,
   type GitHubIssueRecord
 } from "./github-issues.js";
+import { ensureGitHubLabel } from "./github.js";
 import { getIssuePlanPath, getIssueRunPath, saveIssuePlan, saveIssueRun } from "./issue-state.js";
 import { createJobManager } from "./job-manager.js";
 import { type IssueDirectiveScope, parseIssueDirectiveScope } from "./issue-directives.js";
@@ -13,9 +14,11 @@ import { runCodexCliIssueSession } from "./codex-cli-exec.js";
 import type { JobState } from "./types.js";
 export type IssueExecutionStatus = "pending" | "running" | "blocked" | "completed" | "failed";
 export type IssueRunOverallStatus = "running" | "paused" | "completed" | "failed";
+export type IssueExecutionPhase = "implementation" | "validation";
 
 export interface IssueExecutionRecord extends IssuePlanningItem {
   lane: GitHubIssueExecutionLane;
+  phase: IssueExecutionPhase;
   status: IssueExecutionStatus;
   jobIds: string[];
   updatedAt: string;
@@ -49,17 +52,23 @@ function formatIssueRef(issueNumber: number): string {
 }
 
 function buildIssueTask(
-  issue: { issueNumber: number; title: string; body?: string; latestSummary?: string; error?: string },
-  directive: string
+  issue: { issueNumber: number; title: string; body?: string; labels?: string[]; latestSummary?: string; error?: string },
+  directive: string,
+  phase: IssueExecutionPhase
 ): string {
   const lines = [
     `GitHub issue #${issue.issueNumber}: ${issue.title}`,
     "",
-    `Operator directive: ${directive}`
+    `Operator directive: ${directive}`,
+    `Execution phase: ${phase}`
   ];
 
   if (issue.body?.trim()) {
     lines.push("", "Issue body:", issue.body.trim());
+  }
+
+  if (issue.labels && issue.labels.length > 0) {
+    lines.push("", `Current GitHub labels: ${issue.labels.join(", ")}`);
   }
 
   if (issue.latestSummary?.trim()) {
@@ -70,7 +79,24 @@ function buildIssueTask(
     lines.push("", "Prior FelixAI error:", issue.error.trim());
   }
 
-  lines.push("", "Implement the remaining work for this issue in the current repository and leave the repo ready for review.");
+  if (phase === "implementation") {
+    lines.push(
+      "",
+      "Implement the remaining work for this issue in the current repository.",
+      "When the implementation is ready for focused validation, add the GitHub label `ready-to-test`.",
+      "Do not close the issue during the implementation phase unless the issue is already fully validated."
+    );
+  } else {
+    lines.push(
+      "",
+      "Validate this issue end to end.",
+      "If focused unit or regression tests are missing, add them before running validation.",
+      "Run the most relevant automated tests for the changed behavior.",
+      "If validation passes, remove the `ready-to-test` label, add the `done` label, and close or move the issue to done.",
+      "If validation does not pass, keep the issue open and leave clear failure details in your summary."
+    );
+  }
+
   return lines.join("\n");
 }
 
@@ -84,6 +110,14 @@ function summarizeJobForIssue(job: JobState): string | undefined {
 
 function jobCanAutoContinue(job: JobState): boolean {
   return job.status !== "completed";
+}
+
+function issueHasLabel(issue: Pick<GitHubIssueRecord, "labels">, label: string): boolean {
+  return issue.labels.some((existing) => existing.toLowerCase() === label.toLowerCase());
+}
+
+function determineIssuePhase(issue: Pick<GitHubIssueRecord, "labels">): IssueExecutionPhase {
+  return issueHasLabel(issue, "ready-to-test") ? "validation" : "implementation";
 }
 
 export function selectIssueWave(issues: IssueExecutionRecord[]): IssueExecutionRecord[] {
@@ -116,6 +150,7 @@ export class IssueRunner {
     private readonly deps?: {
       snapshotter?: typeof snapshotUnfinishedGitHubIssues;
       fetchIssue?: typeof fetchGitHubIssue;
+      ensureLabel?: typeof ensureGitHubLabel;
     }
   ) {}
 
@@ -136,6 +171,19 @@ export class IssueRunner {
       ...fullSnapshot,
       issues: filteredIssues
     };
+    const ensureLabel = this.deps?.ensureLabel ?? ensureGitHubLabel;
+    await ensureLabel({
+      repoPath: options.repoRoot,
+      name: "ready-to-test",
+      color: "0e8a16",
+      description: "Implementation is ready for focused validation."
+    });
+    await ensureLabel({
+      repoPath: options.repoRoot,
+      name: "done",
+      color: "1d76db",
+      description: "Validation passed and the issue is complete."
+    });
     const metadataErrors = snapshot.issues
       .filter((issue) => (issue.executionMetadata?.validationErrors.length ?? 0) > 0)
       .map((issue) => `#${issue.number}: ${issue.executionMetadata?.validationErrors.join(" ")}`);
@@ -185,6 +233,7 @@ export class IssueRunner {
       status: "running",
       issues: plan.orderedIssues.map((issue) => ({
         ...issue,
+        phase: "implementation",
         status: "pending",
         jobIds: [],
         updatedAt: now()
@@ -278,6 +327,7 @@ export class IssueRunner {
     const fetchIssue = this.deps?.fetchIssue ?? fetchGitHubIssue;
     let record: IssueExecutionRecord = {
       ...issue,
+      phase: determineIssuePhase(issueDetails ?? { labels: [] }),
       status: "running",
       startedAt: issue.startedAt ?? now(),
       updatedAt: now(),
@@ -288,8 +338,11 @@ export class IssueRunner {
     let attempts = 0;
     let currentJob: JobState | undefined;
 
+    let liveIssue = issueDetails ?? (await fetchIssue(document.repoRoot, issue.issueNumber));
+
     while (attempts < 5) {
       attempts += 1;
+      const phase = determineIssuePhase(liveIssue);
 
       currentJob = await manager.startJob({
         repoPath: document.repoRoot,
@@ -297,11 +350,13 @@ export class IssueRunner {
           {
             issueNumber: issue.issueNumber,
             title: issue.title,
-            body: issueDetails?.body,
+            body: liveIssue.body,
+            labels: liveIssue.labels,
             latestSummary: record.latestSummary,
             error: record.error
           },
-          directive
+          directive,
+          phase
         ),
         issueRefs: [formatIssueRef(issue.issueNumber)],
         autoResume: false,
@@ -313,16 +368,18 @@ export class IssueRunner {
         jobIds: [...record.jobIds, currentJob.jobId],
         lastJobId: currentJob.jobId,
         lastJobStatus: currentJob.status,
+        phase,
         latestSummary: summarizeJobForIssue(currentJob),
         updatedAt: now(),
         error: currentJob.status === "completed" ? undefined : currentJob.workItems.find((item) => item.error)?.error
       };
       await this.saveIssueRecord(document, record);
 
-      const refreshedIssue = await fetchIssue(document.repoRoot, issue.issueNumber);
-      if (refreshedIssue.state.toUpperCase() !== "OPEN" || this.isIssueDoneFromBody(refreshedIssue)) {
+      liveIssue = await fetchIssue(document.repoRoot, issue.issueNumber);
+      if (this.isIssueComplete(liveIssue)) {
         return {
           ...record,
+          phase: determineIssuePhase(liveIssue),
           status: "completed",
           completedAt: now(),
           updatedAt: now(),
@@ -347,7 +404,11 @@ export class IssueRunner {
     };
   }
 
-  private isIssueDoneFromBody(issue: GitHubIssueRecord): boolean {
+  private isIssueComplete(issue: GitHubIssueRecord): boolean {
+    if (issue.state.toUpperCase() !== "OPEN" || issueHasLabel(issue, "done")) {
+      return true;
+    }
+
     const metadata = issue.executionMetadata;
     return (metadata?.doneChecklistCount ?? 0) > 0 && metadata?.doneChecklistCount === metadata?.doneChecklistCompletedCount;
   }
