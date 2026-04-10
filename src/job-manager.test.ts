@@ -17,7 +17,7 @@ import {
 import { findCodexSessionTranscript, formatTranscriptLine, readTranscriptTail } from "./codex-sessions.js";
 import { analyzeGitHubAuthStatus } from "./doctor.js";
 import { pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
-import { normalizeGitHubIssues, snapshotUnfinishedGitHubIssues } from "./github-issues.js";
+import { normalizeGitHubIssues, parseGitHubIssueExecutionMetadata, snapshotUnfinishedGitHubIssues } from "./github-issues.js";
 import { commitAllChanges, getBranchPushStatus } from "./git.js";
 import {
   buildPullRequestFailureMessage,
@@ -462,6 +462,29 @@ async function testNormalizeGitHubIssuesAndSnapshotPersistence(): Promise<void> 
   });
   assert.equal(snapshot.issues.length, 1);
   assert.ok(await pathExists(outputPath));
+}
+
+async function testGitHubIssueMetadataParserAcceptsTrailingDoneCriteriaBullets(): Promise<void> {
+  const metadata = parseGitHubIssueExecutionMetadata(
+    [
+      "## Summary",
+      "Body",
+      "",
+      "## Execution Metadata",
+      "- Lane: ordered",
+      "- Depends on: none",
+      "- Parallel-safe: no",
+      "",
+      "## Done Criteria",
+      "- implementation is complete",
+      "- validation passed"
+    ].join("\n"),
+    ["app-ready"]
+  );
+
+  assert.deepEqual(metadata.validationErrors, []);
+  assert.equal(metadata.doneChecklistCount, 2);
+  assert.equal(metadata.doneChecklistCompletedCount, 0);
 }
 
 async function testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues(): Promise<void> {
@@ -3847,6 +3870,7 @@ async function main(): Promise<void> {
   await testRepoAgentsPreferencesParseExecutionPolicy();
   await testCliConfigSetPersistsRepoModelAndReasoning();
   await testNormalizeGitHubIssuesAndSnapshotPersistence();
+  await testGitHubIssueMetadataParserAcceptsTrailingDoneCriteriaBullets();
   await testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues();
   await testIssueRunnerPersistsRunStateAndStopsOnBlockedIssue();
   await testIssueRunnerDoesNotRetryBlockedJobs();

@@ -408,9 +408,7 @@ export class IssueRunner {
     if (issue.state.toUpperCase() !== "OPEN" || issueHasLabel(issue, "done")) {
       return true;
     }
-
-    const metadata = issue.executionMetadata;
-    return (metadata?.doneChecklistCount ?? 0) > 0 && metadata?.doneChecklistCount === metadata?.doneChecklistCompletedCount;
+    return false;
   }
 
   private async saveIssueRecord(document: IssueRunDocument, record: IssueExecutionRecord): Promise<void> {

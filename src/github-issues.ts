@@ -67,9 +67,25 @@ function extractMarkdownSection(body: string | undefined, heading: string): stri
     return undefined;
   }
 
-  const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = body.match(new RegExp(`^##\\s+${escapedHeading}\\s*$([\\s\\S]*?)(?=^##\\s+|\\Z)`, "im"));
-  return match?.[1]?.trim();
+  const normalized = body.replace(/\r/g, "");
+  const lines = normalized.split("\n");
+  const headerPattern = new RegExp(`^##\\s+${heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "i");
+  const startIndex = lines.findIndex((line) => headerPattern.test(line.trim()));
+  if (startIndex === -1) {
+    return undefined;
+  }
+
+  const content: string[] = [];
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (/^##\s+/.test(line.trim())) {
+      break;
+    }
+    content.push(line);
+  }
+
+  const joined = content.join("\n").trim();
+  return joined.length > 0 ? joined : undefined;
 }
 
 function parseDependsOnValue(section: string | undefined): number[] {
@@ -135,10 +151,18 @@ function parseDoneChecklist(section: string | undefined): { total: number; compl
     return { total: 0, completed: 0 };
   }
 
-  const items = [...section.matchAll(/^\s*-\s*\[( |x|X)\]\s+.+$/gm)];
+  const checkboxItems = [...section.matchAll(/^\s*(?:[-*]|\d+\.)\s*\[( |x|X)\]\s+.+$/gm)];
+  if (checkboxItems.length > 0) {
+    return {
+      total: checkboxItems.length,
+      completed: checkboxItems.filter((item) => (item[1] ?? "").toLowerCase() === "x").length
+    };
+  }
+
+  const plainItems = [...section.matchAll(/^\s*(?:[-*]|\d+\.|[a-zA-Z]\.)\s+.+$/gm)];
   return {
-    total: items.length,
-    completed: items.filter((item) => (item[1] ?? "").toLowerCase() === "x").length
+    total: plainItems.length,
+    completed: 0
   };
 }
 
