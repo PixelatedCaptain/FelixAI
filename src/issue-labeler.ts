@@ -23,6 +23,8 @@ export interface IssueLabelingResult {
   assignments: IssueLabelAssignment[];
 }
 
+const GITHUB_LABEL_DESCRIPTION_MAX_LENGTH = 100;
+
 const ISSUE_LABELING_SCHEMA = {
   type: "object",
   properties: {
@@ -79,6 +81,7 @@ export function buildIssueLabelingPrompt(input: {
     "Review the unfinished GitHub issues and decide which labels Felix should apply.",
     "Return a compact label set and an assignment entry for every issue in the provided list.",
     "Prefer concise kebab-case label names.",
+    `Each label description must be ${GITHUB_LABEL_DESCRIPTION_MAX_LENGTH} characters or fewer.`,
     "Use empty labels only when an issue clearly should not receive any of the labels you define.",
     "Keep reasoning concise and specific.",
     ...executionPolicy,
@@ -104,6 +107,14 @@ export function validateIssueLabelingResult(
     }
     if (!/^[0-9a-fA-F]{6}$/.test(label.color)) {
       throw new Error(`Issue labeling result returned invalid color '${label.color}' for label '${label.name}'.`);
+    }
+    if (label.description.trim().length === 0) {
+      throw new Error(`Issue labeling result returned an empty description for label '${label.name}'.`);
+    }
+    if (label.description.length > GITHUB_LABEL_DESCRIPTION_MAX_LENGTH) {
+      throw new Error(
+        `Issue labeling result returned a description longer than ${GITHUB_LABEL_DESCRIPTION_MAX_LENGTH} characters for label '${label.name}'.`
+      );
     }
     labelNames.add(label.name);
   }

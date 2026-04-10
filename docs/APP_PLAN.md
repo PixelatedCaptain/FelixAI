@@ -2,24 +2,24 @@
 
 ## Product definition
 
-FelixAI Orchestrator is a locally installed CLI-driven orchestration engine that coordinates multiple Codex CLI sessions to complete large software engineering tasks in parallel. It is intentionally separate from any relay, dashboard, or remote UI.
-Its target operating model is issue-driven orchestration: FelixAI should be able to review unfinished GitHub issues, ask Codex to propose the safest execution order, and then run one or more Codex sessions per issue until each issue is actually done.
+FelixAI Orchestrator is a locally installed CLI-driven orchestration engine that coordinates Codex CLI sessions against GitHub issues. It is intentionally separate from any relay, dashboard, or remote UI.
+Its target operating model is issue-driven execution, not product planning: an app plan is prepared outside FelixAI, the resulting GitHub issues become the execution contract, and FelixAI schedules and reruns Codex sessions per issue until each issue is actually done.
 
 ## Scope
 
 ### In scope
 
 - Local CLI commands
-- High-level task intake
-- Natural-language task intake
-- Codex-driven task decomposition
-- GitHub issue intake and prioritization
-- Isolated repo workspaces per session
-- Short-lived branch creation per work item
+- GitHub issue intake and execution orchestration
+- GitHub issue dependency and parallel-safety scheduling
+- Repeated Codex CLI sessions per issue until done
+- Isolated repo workspaces per issue session
+- Short-lived branch creation per issue session
 - Session lifecycle tracking
 - State persistence and recovery
-- Boundary-aware auto-resume or manual resume
+- Boundary-aware reissue and retry handling
 - Merge-readiness tracking
+- Operator visibility into live and archived issue runs
 
 ### Out of scope
 
@@ -30,6 +30,9 @@ Its target operating model is issue-driven orchestration: FelixAI should be able
 - Shared Codex account coordination for multiple users
 - Public APIs
 - Dev/test/prod promotion governance
+- App planning and feature prioritization
+- General-purpose natural-language repo assistant behavior
+- Felix-owned backlog design
 
 ## MVP milestones
 
@@ -47,23 +50,23 @@ Its target operating model is issue-driven orchestration: FelixAI should be able
 - temporary branch naming
 - base branch selection
 
-### Milestone 3: planning
+### Milestone 3: issue contract intake
 
-- send large task to Codex planner
-- receive structured work items
-- normalize dependencies
+- read prepared GitHub issues
+- normalize issue metadata and dependencies
+- validate execution metadata before starting
 
-### Milestone 4: execution
+### Milestone 4: Codex issue execution
 
-- launch multiple Codex sessions
-- track session and work-item state
-- expose job status locally
+- launch real Codex CLI issue sessions
+- track per-issue session state
+- expose issue-run status locally
 
-### Milestone 5: resume
+### Milestone 5: issue retry loop
 
-- classify completion vs boundary vs failure
-- auto-resume support
-- manual resume command
+- classify completion vs retry vs blocked
+- continue running issue sessions until issue-done state is reached
+- keep operator-controlled manual intervention available
 
 ### Milestone 6: merge readiness
 
@@ -78,13 +81,12 @@ Its target operating model is issue-driven orchestration: FelixAI should be able
 - error classification
 - packaging polish
 
-### Milestone 8: issue-driven orchestration
+### Milestone 8: execution metadata and scheduling
 
-- natural-language CLI entry point
-- GitHub unfinished-issue discovery
-- Codex issue ordering and dependency planning
-- parallel-safe issue wave scheduling
-- repeated Codex sessions per issue until done
+- GitHub issue metadata contract
+- dependency-aware issue wave scheduling
+- repeated Codex CLI sessions per issue until done
+- repo-scoped aggressive execution policy
 
 ## Current implementation status
 
@@ -95,7 +97,7 @@ Its target operating model is issue-driven orchestration: FelixAI should be able
 - `job resume`: implemented
 - structured state store: implemented
 - workspace isolation with Git worktrees: implemented
-- Codex planner/executor adapter: implemented
+- Codex planner/executor adapter: partially implemented
 - dependency-aware in-flight scheduler: implemented
 - issue-linked branch traceability: implemented
 - persisted remote branch/push metadata: implemented
@@ -110,10 +112,12 @@ Its target operating model is issue-driven orchestration: FelixAI should be able
 - repo-root `AGENTS.md` model and reasoning defaults: implemented
 - direct-to-base merge automation: not yet implemented
 - automatic conflict resolution remains best-effort and operator-reviewed
-- natural-language CLI intake: not yet implemented
-- GitHub unfinished-issue planning and prioritization: not yet implemented
-- issue-driven execution waves based on overlap/dependency analysis: not yet implemented
-- repeated issue execution until issue-done state is reached: not yet implemented
+- external app-plan preparation: required and intentionally outside FelixAI
+- GitHub issue metadata contract for dependency/order/parallel safety: not yet implemented
+- issue-driven execution waves based on overlap/dependency analysis: partially implemented
+- repeated issue execution until issue-done state is reached: partially implemented
+- real Codex CLI parity for issue execution sessions: not yet implemented
+- done-state checking against GitHub issue closure/body contract: not yet implemented
 
 ## Delivery tracking
 
@@ -121,14 +125,16 @@ Its target operating model is issue-driven orchestration: FelixAI should be able
 
 ## Design constraints
 
-- FelixAI orchestrates; Codex plans and executes
-- GitHub issues are the preferred unit of orchestration when a repo uses issue-driven mode
-- each work item gets its own workspace and branch
-- issue-level orchestration should only split an issue into smaller work items when the issue is not already a small, well-defined implementation unit
+- FelixAI orchestrates; Codex executes
+- product and app planning are prepared outside FelixAI
+- GitHub issues are the primary unit of orchestration
+- issue-level metadata, not freeform prompt interpretation, should drive ordering and parallel safety
+- each issue session gets its own workspace and branch
 - state must survive process restarts
 - relay requirements must not leak into this repo
 - FelixAI must use one explicit Codex credential source per installation with no ambient fallback ambiguity
 - aggressive execution policy such as turbo mode or subagent use should be repo-scoped policy, not hard-coded global behavior
+- issue execution should use the same local Codex runtime characteristics the operator uses directly whenever feasible
 
 ## Relay boundary
 

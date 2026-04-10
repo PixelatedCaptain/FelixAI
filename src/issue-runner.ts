@@ -1,16 +1,21 @@
-import { loadConfig } from "./config.js";
-import { snapshotUnfinishedGitHubIssues } from "./github-issues.js";
-import { type GitHubIssueSnapshot, IssuePlanner, type IssuePlanningItem, type IssuePlanningResult } from "./issue-planner.js";
+import {
+  fetchGitHubIssue,
+  snapshotUnfinishedGitHubIssues,
+  type GitHubIssueExecutionLane,
+  type GitHubIssueRecord
+} from "./github-issues.js";
 import { getIssuePlanPath, getIssueRunPath, saveIssuePlan, saveIssueRun } from "./issue-state.js";
 import { createJobManager } from "./job-manager.js";
+import { type IssueDirectiveScope, parseIssueDirectiveScope } from "./issue-directives.js";
+import type { IssuePlanningItem } from "./issue-planner.js";
 import { loadRepoAgentsPreferences } from "./repo-agents.js";
+import { runCodexCliIssueSession } from "./codex-cli-exec.js";
 import type { JobState } from "./types.js";
-import type { ModelReasoningEffort } from "@openai/codex-sdk";
-
 export type IssueExecutionStatus = "pending" | "running" | "blocked" | "completed" | "failed";
 export type IssueRunOverallStatus = "running" | "paused" | "completed" | "failed";
 
 export interface IssueExecutionRecord extends IssuePlanningItem {
+  lane: GitHubIssueExecutionLane;
   status: IssueExecutionStatus;
   jobIds: string[];
   updatedAt: string;
@@ -78,12 +83,7 @@ function summarizeJobForIssue(job: JobState): string | undefined {
 }
 
 function jobCanAutoContinue(job: JobState): boolean {
-  const unresolved = job.workItems.filter((item) => item.status !== "completed");
-  if (unresolved.length === 0) {
-    return false;
-  }
-
-  return unresolved.every((item) => item.retryable !== false);
+  return job.status !== "completed";
 }
 
 export function selectIssueWave(issues: IssueExecutionRecord[]): IssueExecutionRecord[] {
@@ -93,6 +93,7 @@ export function selectIssueWave(issues: IssueExecutionRecord[]): IssueExecutionR
   const eligible = issues.filter(
     (issue) =>
       issue.status === "pending" &&
+      issue.lane !== "blocked" &&
       issue.dependsOn.every((dependency) => completed.has(dependency))
   );
 
@@ -114,40 +115,53 @@ export class IssueRunner {
     private readonly managerFactory: typeof createJobManager = createJobManager,
     private readonly deps?: {
       snapshotter?: typeof snapshotUnfinishedGitHubIssues;
-      planIssues?: (
-        input: {
-          directive: string;
-          repoRoot: string;
-          issues: GitHubIssueSnapshot["issues"];
-          model?: string;
-          modelReasoningEffort?: ModelReasoningEffort;
-          turboMode?: boolean;
-          encourageSubagents?: boolean;
-        }
-      ) => Promise<IssuePlanningResult>;
+      fetchIssue?: typeof fetchGitHubIssue;
     }
   ) {}
 
-  async run(options: { repoRoot: string; directive: string }): Promise<IssueRunDocument> {
+  async run(options: { repoRoot: string; directive: string; scope?: IssueDirectiveScope }): Promise<IssueRunDocument> {
     const repoPreferences = await loadRepoAgentsPreferences(options.repoRoot);
+    const scope = options.scope ?? parseIssueDirectiveScope("issues", [options.directive]);
     const snapshotter = this.deps?.snapshotter ?? snapshotUnfinishedGitHubIssues;
-    const { snapshot, outputPath: snapshotPath } = await snapshotter(this.projectRoot, options.repoRoot);
-    const config = await loadConfig(this.projectRoot);
-    const planIssues =
-      this.deps?.planIssues ??
-      (async (input: Parameters<IssuePlanner["createIssuePlan"]>[0]) => {
-        const planner = new IssuePlanner(config);
-        return planner.createIssuePlan(input);
-      });
-    const plan = await planIssues({
-      directive: options.directive,
-      repoRoot: options.repoRoot,
-      issues: snapshot.issues,
-      model: repoPreferences?.model,
-      modelReasoningEffort: repoPreferences?.reasoningEffort,
-      turboMode: repoPreferences?.turboMode,
-      encourageSubagents: repoPreferences?.encourageSubagents
+    const { snapshot: fullSnapshot, outputPath: snapshotPath } = await snapshotter(this.projectRoot, options.repoRoot);
+    const filteredIssues = fullSnapshot.issues.filter((issue) => {
+      const matchesIssueNumbers = scope.issueNumbers.length === 0 || scope.issueNumbers.includes(issue.number);
+      const matchesLabels = scope.labelFilters.length === 0 || scope.labelFilters.some((label) => issue.labels.includes(label));
+      return matchesIssueNumbers && matchesLabels;
     });
+    if (filteredIssues.length === 0) {
+      throw new Error("No unfinished GitHub issues matched the requested issue numbers and labels.");
+    }
+    const snapshot = {
+      ...fullSnapshot,
+      issues: filteredIssues
+    };
+    const metadataErrors = snapshot.issues
+      .filter((issue) => (issue.executionMetadata?.validationErrors.length ?? 0) > 0)
+      .map((issue) => `#${issue.number}: ${issue.executionMetadata?.validationErrors.join(" ")}`);
+    if (metadataErrors.length > 0) {
+      throw new Error(`GitHub issues are missing required Felix execution metadata.\n${metadataErrors.join("\n")}`);
+    }
+
+    const plan = {
+      summary: `Prepared ${snapshot.issues.length} GitHub issue(s) for Felix execution from issue metadata.`,
+      orderedIssues: [...snapshot.issues]
+        .sort((left, right) => left.number - right.number)
+        .map((issue) => ({
+          issueNumber: issue.number,
+          title: issue.title,
+          lane: issue.executionMetadata?.lane ?? "ordered",
+          dependsOn: issue.executionMetadata?.dependsOn ?? [],
+          parallelSafe: issue.executionMetadata?.parallelSafe ?? false,
+          overlapRisk:
+            issue.executionMetadata?.lane === "ready-parallel"
+              ? ("low" as const)
+              : issue.executionMetadata?.lane === "blocked"
+                ? ("high" as const)
+                : ("medium" as const),
+          reasoning: `Scheduled from issue metadata lane '${issue.executionMetadata?.lane ?? "ordered"}'.`
+        }))
+    };
 
     const planDocument = {
       repoRoot: options.repoRoot,
@@ -179,7 +193,27 @@ export class IssueRunner {
     await saveIssueRun(this.projectRoot, options.repoRoot, document);
 
     const issueByNumber = new Map(snapshot.issues.map((issue) => [issue.number, issue]));
-    const manager = await this.managerFactory(this.projectRoot);
+    const manager = await this.managerFactory(this.projectRoot, {
+      planner: async (task) => ({
+        summary: "Single-session issue execution attempt.",
+        workItems: [
+          {
+            id: "issue-attempt",
+            title: "Issue execution attempt",
+            prompt: task,
+            dependsOn: []
+          }
+        ]
+      }),
+      executor: async (execution) =>
+        runCodexCliIssueSession({
+          prompt: execution.prompt,
+          workspacePath: execution.workspacePath,
+          model: repoPreferences?.model,
+          modelReasoningEffort: repoPreferences?.reasoningEffort,
+          onSessionReady: execution.onSessionReady
+        })
+    });
 
     while (true) {
       const wave = selectIssueWave(document.issues);
@@ -197,7 +231,7 @@ export class IssueRunner {
       }
 
       const completedWave = await Promise.all(
-        wave.map((issue) => this.runSingleIssue(manager, document, issue, issueByNumber, options.directive))
+        wave.map((issue) => this.runSingleIssue(manager, document, issue, issueByNumber, options.directive, repoPreferences))
       );
 
       const updates = new Map(completedWave.map((issue) => [issue.issueNumber, issue]));
@@ -206,6 +240,17 @@ export class IssueRunner {
         updatedAt: now(),
         issues: document.issues.map((issue) => updates.get(issue.issueNumber) ?? issue)
       };
+
+      if (scope.implementFirstOnly && completedWave.some((issue) => issue.status === "completed")) {
+        document = {
+          ...document,
+          updatedAt: now(),
+          status: "completed",
+          summary: `${document.summary} First matching issue implemented; stopping as requested.`
+        };
+        await saveIssueRun(this.projectRoot, options.repoRoot, document);
+        return document;
+      }
 
       if (document.issues.every((issue) => issue.status === "completed")) {
         document = {
@@ -225,10 +270,12 @@ export class IssueRunner {
     manager: Awaited<ReturnType<typeof createJobManager>>,
     document: IssueRunDocument,
     issue: IssueExecutionRecord,
-    issueByNumber: Map<number, GitHubIssueSnapshot["issues"][number]>,
-    directive: string
+    issueByNumber: Map<number, GitHubIssueRecord>,
+    directive: string,
+    repoPreferences?: Awaited<ReturnType<typeof loadRepoAgentsPreferences>>
   ): Promise<IssueExecutionRecord> {
     const issueDetails = issueByNumber.get(issue.issueNumber);
+    const fetchIssue = this.deps?.fetchIssue ?? fetchGitHubIssue;
     let record: IssueExecutionRecord = {
       ...issue,
       status: "running",
@@ -241,7 +288,7 @@ export class IssueRunner {
     let attempts = 0;
     let currentJob: JobState | undefined;
 
-    while (attempts < 3) {
+    while (attempts < 5) {
       attempts += 1;
 
       currentJob = await manager.startJob({
@@ -257,7 +304,8 @@ export class IssueRunner {
           directive
         ),
         issueRefs: [formatIssueRef(issue.issueNumber)],
-        autoResume: true
+        autoResume: false,
+        parallelism: 1
       });
 
       record = {
@@ -271,7 +319,8 @@ export class IssueRunner {
       };
       await this.saveIssueRecord(document, record);
 
-      if (currentJob.status === "completed") {
+      const refreshedIssue = await fetchIssue(document.repoRoot, issue.issueNumber);
+      if (refreshedIssue.state.toUpperCase() !== "OPEN" || this.isIssueDoneFromBody(refreshedIssue)) {
         return {
           ...record,
           status: "completed",
@@ -281,24 +330,26 @@ export class IssueRunner {
         };
       }
 
-      if (jobCanAutoContinue(currentJob)) {
+      if (attempts < 5 && jobCanAutoContinue(currentJob)) {
         continue;
       }
 
-      return {
-        ...record,
-        status: currentJob.status === "failed" ? "failed" : "blocked",
-        updatedAt: now(),
-        error: currentJob.workItems.find((item) => item.error)?.error ?? `Issue run stopped with job status '${currentJob.status}'.`
-      };
+      if (attempts < 5) {
+        continue;
+      }
     }
 
     return {
       ...record,
       status: "blocked",
       updatedAt: now(),
-      error: record.error ?? "Issue run hit the maximum retry budget before reaching completion."
+      error: record.error ?? "Issue run hit the maximum retry budget before the GitHub issue reached done state."
     };
+  }
+
+  private isIssueDoneFromBody(issue: GitHubIssueRecord): boolean {
+    const metadata = issue.executionMetadata;
+    return (metadata?.doneChecklistCount ?? 0) > 0 && metadata?.doneChecklistCount === metadata?.doneChecklistCompletedCount;
   }
 
   private async saveIssueRecord(document: IssueRunDocument, record: IssueExecutionRecord): Promise<void> {

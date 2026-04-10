@@ -14,12 +14,24 @@ import {
   loadCurrentCodexModel,
   normalizeCodexModelSlug
 } from "./codex-models.js";
+import { findCodexSessionTranscript, formatTranscriptLine, readTranscriptTail } from "./codex-sessions.js";
 import { analyzeGitHubAuthStatus } from "./doctor.js";
 import { pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
 import { normalizeGitHubIssues, snapshotUnfinishedGitHubIssues } from "./github-issues.js";
 import { commitAllChanges, getBranchPushStatus } from "./git.js";
-import { buildPullRequestFailureMessage, createPullRequestWithRunner, hasGitHubTokenPrecedenceConflict } from "./github.js";
-import { classifyTopLevelInput, looksLikeIssueDrivenDirective, looksLikeIssueLabelingDirective } from "./issue-directives.js";
+import {
+  buildPullRequestFailureMessage,
+  createPullRequestWithRunner,
+  hasGitHubTokenPrecedenceConflict,
+  truncateGitHubLabelDescription
+} from "./github.js";
+import {
+  classifyTopLevelInput,
+  looksLikeIssueDrivenDirective,
+  looksLikeIssueLabelingDirective,
+  looksLikePlanThenExecuteDirective,
+  parseIssueDirectiveScope
+} from "./issue-directives.js";
 import { buildIssueLabelingPrompt, validateIssueLabelingResult } from "./issue-labeler.js";
 import { buildIssuePlanningPrompt, validateIssuePlanningResult, type GitHubIssueSnapshotItem } from "./issue-planner.js";
 import { IssueRunner, selectIssueWave } from "./issue-runner.js";
@@ -380,6 +392,47 @@ async function testIssueLabelingPromptAndValidation(): Promise<void> {
     ),
     /invalid label name/i
   );
+
+  await assert.rejects(
+    Promise.resolve().then(() =>
+      validateIssueLabelingResult(
+        {
+          summary: "Broken",
+          labels: [
+            {
+              name: "app-readiness",
+              description:
+                "This description is intentionally made too long for GitHub label validation so Felix rejects it before any write happens.",
+              color: "1d76db"
+            }
+          ],
+          assignments: [
+            {
+              issueNumber: 44,
+              title: "Finalize launch docs",
+              labels: ["app-readiness"],
+              reasoning: "bad"
+            },
+            {
+              issueNumber: 45,
+              title: "Harden worker reliability",
+              labels: [],
+              reasoning: "bad"
+            }
+          ]
+        },
+        issues
+      )
+    ),
+    /longer than 100 characters/i
+  );
+
+  assert.equal(
+    truncateGitHubLabelDescription(
+      "This description is intentionally made too long for GitHub label validation so Felix trims it before creating the label."
+    ).length,
+    100
+  );
 }
 
 async function testNormalizeGitHubIssuesAndSnapshotPersistence(): Promise<void> {
@@ -416,6 +469,7 @@ async function testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues(): Prom
     {
       issueNumber: 38,
       title: "Scheduler",
+      lane: "ready-parallel",
       dependsOn: [],
       parallelSafe: true,
       overlapRisk: "low",
@@ -427,6 +481,7 @@ async function testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues(): Prom
     {
       issueNumber: 39,
       title: "CLI intake",
+      lane: "ready-parallel",
       dependsOn: [],
       parallelSafe: true,
       overlapRisk: "low",
@@ -438,6 +493,7 @@ async function testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues(): Prom
     {
       issueNumber: 41,
       title: "Issue repetition",
+      lane: "ordered",
       dependsOn: [38],
       parallelSafe: false,
       overlapRisk: "high",
@@ -515,50 +571,65 @@ async function testIssueRunnerPersistsRunStateAndStopsOnBlockedIssue(): Promise<
               id: "I_101",
               number: 101,
               title: "Independent issue",
-              body: "Body",
+              body: "## Summary\nBody\n\n## Execution Metadata\n- Lane: ready-parallel\n- Depends on: none\n- Parallel-safe: yes\n\n## Done Criteria\n- [ ] done",
               bodySummary: "Body",
               labels: [],
               assignees: [],
               state: "OPEN",
               updatedAt: nowIso(),
-              url: "https://example.test/issues/101"
+              url: "https://example.test/issues/101",
+              executionMetadata: {
+                lane: "ready-parallel",
+                dependsOn: [],
+                parallelSafe: true,
+                doneChecklistCount: 1,
+                doneChecklistCompletedCount: 0,
+                validationErrors: []
+              }
             },
             {
               id: "I_102",
               number: 102,
               title: "Blocked issue",
-              body: "Body",
+              body: "## Summary\nBody\n\n## Execution Metadata\n- Lane: ready-parallel\n- Depends on: none\n- Parallel-safe: yes\n\n## Done Criteria\n- [ ] done",
               bodySummary: "Body",
               labels: [],
               assignees: [],
               state: "OPEN",
               updatedAt: nowIso(),
-              url: "https://example.test/issues/102"
+              url: "https://example.test/issues/102",
+              executionMetadata: {
+                lane: "ready-parallel",
+                dependsOn: [],
+                parallelSafe: true,
+                doneChecklistCount: 1,
+                doneChecklistCompletedCount: 0,
+                validationErrors: []
+              }
             }
           ]
         },
         outputPath: path.join(root, ".felixai", "state", "issues", "snapshot.json")
       }),
-      planIssues: async () => ({
-        summary: "Run #101 before #102 if needed.",
-        orderedIssues: [
-          {
-            issueNumber: 101,
-            title: "Independent issue",
-            dependsOn: [],
-            parallelSafe: true,
-            overlapRisk: "low",
-            reasoning: "Safe."
-          },
-          {
-            issueNumber: 102,
-            title: "Blocked issue",
-            dependsOn: [],
-            parallelSafe: true,
-            overlapRisk: "low",
-            reasoning: "Also safe."
-          }
-        ]
+      fetchIssue: async (_repoRoot, issueNumber) => ({
+        id: `I_${issueNumber}`,
+        number: issueNumber,
+        title: issueNumber === 101 ? "Independent issue" : "Blocked issue",
+        body: "## Done Criteria\n- [x] done",
+        bodySummary: "done",
+        labels: [],
+        assignees: [],
+        state: issueNumber === 101 ? "CLOSED" : "OPEN",
+        updatedAt: nowIso(),
+        url: `https://example.test/issues/${issueNumber}`,
+        executionMetadata: {
+          lane: "ordered",
+          dependsOn: [],
+          parallelSafe: false,
+          doneChecklistCount: 1,
+          doneChecklistCompletedCount: issueNumber === 101 ? 1 : 0,
+          validationErrors: []
+        }
       })
     }
   );
@@ -572,6 +643,325 @@ async function testIssueRunnerPersistsRunStateAndStopsOnBlockedIssue(): Promise<
   assert.equal(run.issues.find((issue) => issue.issueNumber === 101)?.status, "completed");
   assert.equal(run.issues.find((issue) => issue.issueNumber === 102)?.status, "blocked");
   assert.ok(await pathExists(path.join(root, ".felixai", "state", "issues")));
+}
+
+async function testIssueRunnerDoesNotRetryBlockedJobs(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-issue-runner-blocked-once-"));
+  await runCommand("git", ["init", "-b", "main"], { cwd: root });
+  await writeFile(path.join(root, "AGENTS.md"), "model: gpt-5.4\n", "utf8");
+  await ensureFelixDirectories(root);
+
+  let startCount = 0;
+  const managerFactory = (async () =>
+    ({
+      startJob: async ({ issueRefs }: { issueRefs?: string[] }) => {
+        startCount += 1;
+        return {
+          schemaVersion: 1,
+          jobId: `job-${startCount}`,
+          status: "paused",
+          repoPath: root,
+          repoRoot: root,
+          task: "task",
+          issueRefs: issueRefs ?? [],
+          baseBranch: "main",
+          parallelism: 1,
+          autoResume: true,
+          maxResumesPerItem: 2,
+          planningSummary: "summary",
+          workItems: [
+            {
+              id: "WI-1",
+              title: "blocked work",
+              prompt: "blocked work",
+              issueRefs: issueRefs ?? [],
+              dependsOn: [],
+              status: "blocked",
+              attempts: 1,
+              lastResponse: "need operator input",
+              error: "need operator input",
+              retryable: false,
+              manualReviewRequired: true
+            }
+          ],
+          sessions: [],
+          events: [],
+          mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+          mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+          remoteBranches: [],
+          pullRequests: [],
+          issueSummaries: [],
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        } satisfies JobState;
+      }
+    })) as unknown as typeof createJobManager;
+
+  const runner = new IssueRunner(root, managerFactory, {
+    snapshotter: async () => ({
+      snapshot: {
+        repoRoot: root,
+        generatedAt: nowIso(),
+        issues: [
+            {
+              id: "I_109",
+              number: 109,
+              title: "Blocked issue",
+              body: "## Summary\nBody\n\n## Execution Metadata\n- Lane: ordered\n- Depends on: none\n- Parallel-safe: no\n\n## Done Criteria\n- [ ] done",
+              bodySummary: "Body",
+              labels: ["app-ready"],
+              assignees: [],
+              state: "OPEN",
+              updatedAt: nowIso(),
+              url: "https://example.test/issues/109",
+              executionMetadata: {
+                lane: "ordered",
+                dependsOn: [],
+                parallelSafe: false,
+                doneChecklistCount: 1,
+                doneChecklistCompletedCount: 0,
+                validationErrors: []
+              }
+            }
+          ]
+        },
+        outputPath: path.join(root, ".felixai", "state", "issues", "snapshot.json")
+      }),
+      fetchIssue: async () => ({
+        id: "I_109",
+        number: 109,
+        title: "Blocked issue",
+        body: "## Done Criteria\n- [ ] done",
+        bodySummary: "Body",
+        labels: ["app-ready"],
+        assignees: [],
+        state: "OPEN",
+        updatedAt: nowIso(),
+        url: "https://example.test/issues/109",
+        executionMetadata: {
+          lane: "ordered",
+          dependsOn: [],
+          parallelSafe: false,
+          doneChecklistCount: 1,
+          doneChecklistCompletedCount: 0,
+          validationErrors: []
+        }
+      })
+  });
+
+  const run = await runner.run({
+    repoRoot: root,
+    directive: "implement github issue #109"
+  });
+
+  assert.equal(startCount, 5);
+  assert.equal(run.status, "paused");
+  assert.equal(run.issues[0]?.status, "blocked");
+}
+
+async function testCodexSessionTranscriptDiscoveryAndFormatting(): Promise<void> {
+  const originalUserProfile = process.env.USERPROFILE;
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-codex-session-"));
+  const sessionId = "019d76f8-17ba-7ba3-bb0c-46a7fbe09bb8";
+  const sessionDir = path.join(root, ".codex", "sessions", "2026", "04", "10");
+  await mkdir(sessionDir, { recursive: true });
+  const transcriptPath = path.join(sessionDir, `rollout-2026-04-10T05-37-43-${sessionId}.jsonl`);
+  await writeFile(
+    transcriptPath,
+    [
+      JSON.stringify({
+        timestamp: "2026-04-10T10:37:46.343Z",
+        type: "session_meta",
+        payload: {
+          id: sessionId,
+          cwd: "C:\\repo"
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2026-04-10T10:39:18.048Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "shell_command"
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2026-04-10T10:39:18.298Z",
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          output: "Exit code: 0\r\nWall time: 0.2 seconds\r\nOutput:\r\nok\r\n"
+        }
+      })
+    ].join("\n"),
+    "utf8"
+  );
+
+  process.env.USERPROFILE = root;
+  try {
+    assert.equal(await findCodexSessionTranscript(sessionId), transcriptPath);
+    const tail = await readTranscriptTail(transcriptPath, 2);
+    assert.equal(tail.length, 2);
+    assert.match(formatTranscriptLine(tail[0]!), /tool call shell_command/);
+    assert.match(formatTranscriptLine(tail[1]!), /tool output Exit code: 0/);
+  } finally {
+    if (originalUserProfile === undefined) {
+      delete process.env.USERPROFILE;
+    } else {
+      process.env.USERPROFILE = originalUserProfile;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function testIssueRunnerFiltersToExplicitIssuesAndStopsAfterFirstRequestedImplementation(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-issue-scope-"));
+  await runCommand("git", ["init", "-b", "main"], { cwd: root });
+  await writeFile(path.join(root, "AGENTS.md"), "model: gpt-5.4\n", "utf8");
+  await ensureFelixDirectories(root);
+
+  const managerFactory = (async () =>
+    ({
+      startJob: async ({ issueRefs }: { issueRefs?: string[] }) =>
+        ({
+          schemaVersion: 1,
+          jobId: `job-${issueRefs?.[0] ?? "none"}`,
+          status: "completed",
+          repoPath: root,
+          repoRoot: root,
+          task: "task",
+          issueRefs: issueRefs ?? [],
+          baseBranch: "main",
+          parallelism: 1,
+          autoResume: true,
+          maxResumesPerItem: 2,
+          planningSummary: "summary",
+          workItems: [
+            {
+              id: "WI-1",
+              title: "work",
+              prompt: "work",
+              issueRefs: issueRefs ?? [],
+              dependsOn: [],
+              status: "completed",
+              attempts: 1,
+              lastResponse: "done"
+            }
+          ],
+          sessions: [],
+          events: [],
+          mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+          mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+          remoteBranches: [],
+          pullRequests: [],
+          issueSummaries: [],
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        }) satisfies JobState
+    })) as unknown as typeof createJobManager;
+
+  const runner = new IssueRunner(root, managerFactory, {
+    snapshotter: async () => ({
+      snapshot: {
+        repoRoot: root,
+        generatedAt: nowIso(),
+        issues: [
+            {
+              id: "I_138",
+              number: 138,
+              title: "Workflow issue",
+              body: "## Summary\nBody\n\n## Execution Metadata\n- Lane: blocked\n- Depends on: none\n- Parallel-safe: no\n\n## Done Criteria\n- [ ] done",
+              bodySummary: "Body",
+              labels: ["workflow", "blocked"],
+              assignees: [],
+              state: "OPEN",
+              updatedAt: nowIso(),
+              url: "https://example.test/issues/138",
+              executionMetadata: {
+                lane: "blocked",
+                dependsOn: [],
+                parallelSafe: false,
+                doneChecklistCount: 1,
+                doneChecklistCompletedCount: 0,
+                validationErrors: []
+              }
+            },
+            {
+              id: "I_144",
+              number: 144,
+              title: "App issue",
+              body: "## Summary\nBody\n\n## Execution Metadata\n- Lane: ordered\n- Depends on: none\n- Parallel-safe: no\n\n## Done Criteria\n- [ ] done",
+              bodySummary: "Body",
+              labels: ["app-ready"],
+              assignees: [],
+              state: "OPEN",
+              updatedAt: nowIso(),
+              url: "https://example.test/issues/144",
+              executionMetadata: {
+                lane: "ordered",
+                dependsOn: [],
+                parallelSafe: false,
+                doneChecklistCount: 1,
+                doneChecklistCompletedCount: 0,
+                validationErrors: []
+              }
+            },
+            {
+              id: "I_200",
+              number: 200,
+              title: "Other issue",
+              body: "## Summary\nBody\n\n## Execution Metadata\n- Lane: ordered\n- Depends on: none\n- Parallel-safe: no\n\n## Done Criteria\n- [ ] done",
+              bodySummary: "Body",
+              labels: ["app-ready"],
+              assignees: [],
+              state: "OPEN",
+              updatedAt: nowIso(),
+              url: "https://example.test/issues/200",
+              executionMetadata: {
+                lane: "ordered",
+                dependsOn: [],
+                parallelSafe: false,
+                doneChecklistCount: 1,
+                doneChecklistCompletedCount: 0,
+                validationErrors: []
+              }
+            }
+          ]
+        },
+        outputPath: path.join(root, ".felixai", "state", "issues", "snapshot.json")
+      }),
+      fetchIssue: async (_repoRoot, issueNumber) => ({
+        id: `I_${issueNumber}`,
+        number: issueNumber,
+        title: issueNumber === 144 ? "App issue" : issueNumber === 138 ? "Workflow issue" : "Other issue",
+        body: issueNumber === 144 ? "## Done Criteria\n- [x] done" : "## Done Criteria\n- [ ] done",
+        bodySummary: "Body",
+        labels: issueNumber === 144 ? ["app-ready"] : issueNumber === 138 ? ["workflow", "blocked"] : ["app-ready"],
+        assignees: [],
+        state: issueNumber === 144 ? "CLOSED" : "OPEN",
+        updatedAt: nowIso(),
+        url: `https://example.test/issues/${issueNumber}`,
+        executionMetadata: {
+          lane: issueNumber === 138 ? "blocked" : "ordered",
+          dependsOn: [],
+          parallelSafe: false,
+          doneChecklistCount: 1,
+          doneChecklistCompletedCount: issueNumber === 144 ? 1 : 0,
+          validationErrors: []
+        }
+      })
+  });
+
+  const run = await runner.run({
+    repoRoot: root,
+    directive: "review github issues #138 and #144, decide which should go first, then implement the first one"
+  });
+
+  assert.equal(run.status, "completed");
+  assert.equal(run.issues.length, 2);
+  assert.equal(run.issues.find((issue) => issue.issueNumber === 144)?.status, "completed");
+  assert.equal(run.issues.find((issue) => issue.issueNumber === 138)?.status, "pending");
+  assert.match(run.summary, /First matching issue implemented/i);
 }
 
 async function testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt(): Promise<void> {
@@ -594,6 +984,20 @@ async function testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt(): Prom
   assert.equal(looksLikeIssueDrivenDirective("version", []), false);
 }
 
+async function testLooksLikePlanThenExecuteDirectiveDetectsMixedIntent(): Promise<void> {
+  assert.equal(
+    looksLikePlanThenExecuteDirective(
+      "review",
+      ["github", "issues", "#138", "and", "#144,", "decide", "which", "should", "go", "first,", "then", "implement", "the", "first", "one"]
+    ),
+    true
+  );
+  assert.equal(
+    looksLikePlanThenExecuteDirective("implement", ["github", "issue", "#144"]),
+    false
+  );
+}
+
 async function testLooksLikeIssueLabelingDirectiveDetectsLabelWork(): Promise<void> {
   assert.equal(
     looksLikeIssueLabelingDirective(
@@ -603,6 +1007,13 @@ async function testLooksLikeIssueLabelingDirectiveDetectsLabelWork(): Promise<vo
     true
   );
   assert.equal(looksLikeIssueLabelingDirective("how", ["many", "issues", "are", "not", "done"]), false);
+  assert.equal(
+    looksLikeIssueLabelingDirective(
+      "review",
+      ["github", "issues", "and", "prioritize", "all", "issues", "with", "app-ready", "label", "then", "proceed", "with", "implementing", "them"]
+    ),
+    false
+  );
 }
 
 async function testClassifyTopLevelInputRoutesKnownCommandsIssuesAndRepoPrompts(): Promise<void> {
@@ -650,8 +1061,46 @@ async function testClassifyTopLevelInputRoutesKnownCommandsIssuesAndRepoPrompts(
     ),
     "issue_labels"
   );
+  assert.equal(
+    classifyTopLevelInput("implement", ["all", "the", "github", "issues", "with", "the", "label", "app-ready"]),
+    "issue"
+  );
+  assert.equal(
+    classifyTopLevelInput(
+      "review",
+      ["github", "issues", "and", "prioritize", "all", "issues", "with", "app-ready", "label", "then", "proceed", "with", "implementing", "them"]
+    ),
+    "issue"
+  );
   assert.equal(classifyTopLevelInput("how", ["many", "issues", "are", "not", "done"]), "repo");
   assert.equal(classifyTopLevelInput("tell", ["me", "about", "this", "repo"]), "repo");
+}
+
+async function testParseIssueDirectiveScopeExtractsIssueRefsLabelsAndFirstOnly(): Promise<void> {
+  const parsed = parseIssueDirectiveScope("review", [
+    "github",
+    "issues",
+    "#138",
+    "and",
+    "#144,",
+    "decide",
+    "which",
+    "should",
+    "go",
+    "first,",
+    "then",
+    "implement",
+    "the",
+    "first",
+    "one",
+    "with",
+    "label",
+    "app-ready"
+  ]);
+
+  assert.deepEqual(parsed.issueNumbers, [138, 144]);
+  assert.deepEqual(parsed.labelFilters, ["app-ready"]);
+  assert.equal(parsed.implementFirstOnly, true);
 }
 
 async function testPlanRefinementCollapsesCoupledTestWorkItems(): Promise<void> {
@@ -1622,7 +2071,7 @@ async function testBlockedExecutionIsPersistedForManualReview(): Promise<void> {
   assert.equal(job.status, "paused");
   assert.equal(job.workItems[0].status, "blocked");
   assert.equal(job.workItems[0].failureCategory, "execution-blocked");
-  assert.equal(job.workItems[0].retryable, true);
+  assert.equal(job.workItems[0].retryable, false);
   assert.equal(job.workItems[0].manualReviewRequired, true);
   assert.equal(job.sessions[0]?.status, "blocked");
 
@@ -2758,6 +3207,10 @@ async function testCliStatusHighlightsStaleRunningWorkItems(): Promise<void> {
         branchName: "agent/slow/job-running-stale",
         attemptCount: 1,
         lastPrompt: "Slow item",
+        progressSummary: "changed_files=2 recent=src/A.cs, tests/A.Tests.cs last_file_update=45s_ago",
+        changedFilesCount: 2,
+        recentChangedFiles: ["src/A.cs", "tests/A.Tests.cs"],
+        lastWorkspaceActivityAt: oldTimestamp,
         updatedAt: oldTimestamp
       }
     ],
@@ -2788,7 +3241,443 @@ async function testCliStatusHighlightsStaleRunningWorkItems(): Promise<void> {
 
   assert.match(output.stdout, /\[felixai\] slow: running .*running_for=/);
   assert.match(output.stdout, /\[felixai\] slow: running .*signal=stale/);
+  assert.match(output.stdout, /\[felixai\] slow: running .*changed_files=2/);
+  assert.match(output.stdout, /\[felixai\] slow: recent_changed=src\/A\.cs, tests\/A\.Tests\.cs/);
+  assert.match(output.stdout, /\[felixai\] slow: progress=changed_files=2 recent=src\/A\.cs, tests\/A\.Tests\.cs/);
   assert.match(output.stdout, /\[felixai\] action required: running work item may be stalled/);
+}
+
+async function testCliJobListShowsSingleLineSummaries(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-job-list-summary-"));
+  await ensureFelixDirectories(root);
+
+  const jobId = "20260410-job-list";
+  await writeJsonFile(path.join(root, ".felixai", "state", "jobs", `${jobId}.json`), {
+    schemaVersion: 1,
+    jobId,
+    status: "running",
+    repoPath: root,
+    repoRoot: root,
+    task: [
+      "GitHub issue #109: Finish remaining secret access-boundary coverage for launch",
+      "",
+      "Operator directive: review github issues labeled as app-ready and tell me the top 3 that we should implement now",
+      "",
+      "Issue body:",
+      "A very long body that should never appear in job list."
+    ].join("\n"),
+    issueRefs: ["109"],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: true,
+    maxResumesPerItem: 2,
+    planningSummary: "summary",
+    workItems: [
+      {
+        id: "WI-109-1",
+        title: "summary",
+        prompt: "summary",
+        issueRefs: ["109"],
+        dependsOn: [],
+        status: "running",
+        attempts: 1
+      }
+    ],
+    sessions: [],
+    events: [],
+    mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+    mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  });
+
+  const output = await runCommand(process.execPath, [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js"), "job", "list"], {
+    cwd: root
+  });
+
+  assert.match(output.stdout, /GitHub issue #109: Finish remaining secret access-boundary coverage for launch/);
+  assert.doesNotMatch(output.stdout, /Operator directive:/);
+  assert.doesNotMatch(output.stdout, /Issue body:/);
+}
+
+async function testArchiveStaleActiveJobsRemovesOnlyDeadActiveState(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-archive-stale-jobs-"));
+  await ensureFelixDirectories(root);
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store,
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "unused",
+      workItems: [{ id: "unused", title: "unused", prompt: "unused", dependsOn: [] }]
+    }),
+    executor: async (): Promise<ExecutionResult> => ({
+      status: "completed",
+      summary: "unused"
+    })
+  });
+
+  const oldTimestamp = new Date(Date.now() - 16 * 60_000).toISOString();
+  const freshTimestamp = new Date(Date.now() - 2 * 60_000).toISOString();
+
+  await writeJsonFile(path.join(root, ".felixai", "state", "jobs", "stale-running.json"), {
+    schemaVersion: 1,
+    jobId: "stale-running",
+    status: "running",
+    repoPath: root,
+    repoRoot: root,
+    task: "stale running task",
+    issueRefs: [],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: true,
+    maxResumesPerItem: 2,
+    workItems: [],
+    sessions: [],
+    events: [],
+    mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+    mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: oldTimestamp,
+    updatedAt: oldTimestamp
+  });
+
+  await writeJsonFile(path.join(root, ".felixai", "state", "jobs", "fresh-running.json"), {
+    schemaVersion: 1,
+    jobId: "fresh-running",
+    status: "running",
+    repoPath: root,
+    repoRoot: root,
+    task: "fresh running task",
+    issueRefs: [],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: true,
+    maxResumesPerItem: 2,
+    workItems: [],
+    sessions: [],
+    events: [],
+    mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+    mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: freshTimestamp,
+    updatedAt: freshTimestamp
+  });
+
+  await writeJsonFile(path.join(root, ".felixai", "state", "jobs", "paused-old.json"), {
+    schemaVersion: 1,
+    jobId: "paused-old",
+    status: "paused",
+    repoPath: root,
+    repoRoot: root,
+    task: "paused old task",
+    issueRefs: [],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: true,
+    maxResumesPerItem: 2,
+    workItems: [],
+    sessions: [],
+    events: [],
+    mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+    mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: oldTimestamp,
+    updatedAt: oldTimestamp
+  });
+
+  const archived = await manager.archiveStaleActiveJobs({ repoRoot: root, staleAfterMs: 15 * 60_000 });
+  const visibleJobs = await manager.listJobs();
+
+  assert.deepEqual(archived.map((job) => job.jobId), ["stale-running"]);
+  assert.deepEqual(
+    visibleJobs.map((job) => job.jobId).sort(),
+    ["fresh-running", "paused-old"]
+  );
+  assert.equal(await pathExists(path.join(root, ".felixai", "state", "archive", "jobs", "stale-running.json")), true);
+}
+
+async function testRunningJobPersistsCodexSessionIdBeforeCompletion(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-session-start-"));
+  await ensureFelixDirectories(root);
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  let releaseExecution: (() => void) | undefined;
+
+  const manager = new JobManager({
+    config: DEFAULT_CONFIG,
+    store,
+    resolveRepoContext: async () => ({
+      repoRoot: root,
+      baseBranch: "main",
+      dirtyWorkingTree: false
+    }),
+    workspaceManager: {
+      ensureWorkspace: async (jobId, workItemId) => createFakeWorkspace(root, jobId, workItemId)
+    },
+    planner: async (): Promise<PlanResult> => ({
+      summary: "session start",
+      workItems: [{ id: "alpha", title: "Alpha", prompt: "Alpha", dependsOn: [] }]
+    }),
+    executor: async ({ onSessionReady }): Promise<ExecutionResult> => {
+      await onSessionReady?.("session-alpha");
+      await new Promise<void>((resolve) => {
+        releaseExecution = resolve;
+      });
+      return {
+        status: "completed",
+        summary: "done",
+        sessionId: "session-alpha"
+      };
+    }
+  });
+
+  const jobPromise = manager.startJob({
+    repoPath: root,
+    task: "session start"
+  });
+
+  let running: JobState | undefined;
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const jobs = await manager.listJobs();
+    const candidate = jobs.find((job) => job.workItems.some((item) => item.id === "alpha"));
+    if (candidate?.sessions.find((session) => session.workItemId === "alpha")?.sessionId === "session-alpha") {
+      running = candidate;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  assert.equal(running?.workItems.find((item) => item.id === "alpha")?.sessionId, "session-alpha");
+  assert.equal(running?.sessions.find((session) => session.workItemId === "alpha")?.sessionId, "session-alpha");
+  assert.equal(running?.events.some((event) => /Codex session started: session-alpha/.test(event.message)), true);
+
+  releaseExecution?.();
+  const completed = await jobPromise;
+  assert.equal(completed.status, "completed");
+}
+
+async function testCliJobWatchReportsStartupStateWithoutSession(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-job-watch-starting-"));
+  await ensureFelixDirectories(root);
+
+  const jobId = "20260410-starting-watch";
+  await writeJsonFile(path.join(root, ".felixai", "state", "jobs", `${jobId}.json`), {
+    schemaVersion: 1,
+    jobId,
+    status: "running",
+    repoPath: root,
+    repoRoot: root,
+    task: "starting watch task",
+    issueRefs: ["109"],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: true,
+    maxResumesPerItem: 2,
+    planningSummary: "summary",
+    workItems: [
+      {
+        id: "felix-109-1",
+        title: "startup",
+        prompt: "startup",
+        issueRefs: ["109"],
+        dependsOn: [],
+        status: "running",
+        attempts: 1
+      }
+    ],
+    sessions: [
+      {
+        workItemId: "felix-109-1",
+        status: "running",
+        attemptCount: 1,
+        updatedAt: nowIso()
+      }
+    ],
+    events: [],
+    mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+    mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  });
+
+  const output = await runCommand(process.execPath, [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js"), "job", "watch", jobId, "--no-follow"], {
+    cwd: root
+  }).catch((error: Error & { stdout?: string; stderr?: string }) => error);
+
+  const combined = `${"stdout" in output ? output.stdout ?? "" : ""}${"stderr" in output ? output.stderr ?? "" : ""}`;
+  assert.match(combined, /still starting; no Codex session has been established yet/i);
+}
+
+async function testCliSessionWatchPrintsTranscriptTail(): Promise<void> {
+  const originalUserProfile = process.env.USERPROFILE;
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-cli-session-watch-"));
+  const sessionId = "019d76f8-17ba-7ba3-bb0c-46a7fbe09bb8";
+  const sessionDir = path.join(root, ".codex", "sessions", "2026", "04", "10");
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(
+    path.join(sessionDir, `rollout-2026-04-10T05-37-43-${sessionId}.jsonl`),
+    [
+      JSON.stringify({
+        timestamp: "2026-04-10T10:39:18.048Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "shell_command"
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2026-04-10T10:39:18.298Z",
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          output: "Exit code: 0\r\nOutput:\r\nok\r\n"
+        }
+      })
+    ].join("\n"),
+    "utf8"
+  );
+
+  process.env.USERPROFILE = root;
+  try {
+    const output = await runCommand(
+      process.execPath,
+      [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js"), "session", "watch", sessionId, "--no-follow", "--lines", "10"],
+      { cwd: root, env: { ...process.env } }
+    );
+
+    assert.match(output.stdout, /\[felixai\] transcript:/);
+    assert.match(output.stdout, /tool call shell_command/);
+    assert.match(output.stdout, /tool output Exit code: 0/);
+  } finally {
+    if (originalUserProfile === undefined) {
+      delete process.env.USERPROFILE;
+    } else {
+      process.env.USERPROFILE = originalUserProfile;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function testCliJobWatchResolvesRunningSessionTranscript(): Promise<void> {
+  const originalUserProfile = process.env.USERPROFILE;
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-cli-job-watch-"));
+  await ensureFelixDirectories(root);
+
+  const jobId = "20260410-job-watch";
+  const sessionId = "019d76f8-17ba-7ba3-bb0c-46a7fbe09bb8";
+  await writeJsonFile(path.join(root, ".felixai", "state", "jobs", `${jobId}.json`), {
+    schemaVersion: 1,
+    jobId,
+    status: "running",
+    repoPath: root,
+    repoRoot: root,
+    task: "watch running issue",
+    issueRefs: ["109"],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: true,
+    maxResumesPerItem: 2,
+    planningSummary: "watch",
+    workItems: [
+      {
+        id: "WI-109-1",
+        title: "Watch me",
+        prompt: "Watch me",
+        issueRefs: ["109"],
+        dependsOn: [],
+        status: "running",
+        attempts: 1,
+        branchName: "agent/issue-109/job-watch",
+        workspacePath: path.join(root, ".felixai", "workspaces", jobId, "WI-109-1"),
+        startedAt: new Date().toISOString()
+      }
+    ],
+    sessions: [
+      {
+        workItemId: "WI-109-1",
+        sessionId,
+        status: "running",
+        workspacePath: path.join(root, ".felixai", "workspaces", jobId, "WI-109-1"),
+        branchName: "agent/issue-109/job-watch",
+        attemptCount: 1,
+        updatedAt: new Date().toISOString()
+      }
+    ],
+    events: [],
+    mergeReadiness: {
+      completedBranches: [],
+      pendingBranches: ["agent/issue-109/job-watch"],
+      branchReadiness: [],
+      generatedAt: new Date().toISOString()
+    },
+    mergeAutomation: {
+      targetBranch: "main",
+      mergedBranches: [],
+      pendingBranches: [],
+      conflicts: [],
+      status: "pending"
+    },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+
+  const sessionDir = path.join(root, ".codex", "sessions", "2026", "04", "10");
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(
+    path.join(sessionDir, `rollout-2026-04-10T05-37-43-${sessionId}.jsonl`),
+    JSON.stringify({
+      timestamp: "2026-04-10T10:39:18.048Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "shell_command"
+      }
+    }),
+    "utf8"
+  );
+
+  process.env.USERPROFILE = root;
+  try {
+    const output = await runCommand(
+      process.execPath,
+      [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js"), "job", "watch", jobId, "--no-follow"],
+      { cwd: root, env: { ...process.env } }
+    );
+
+    assert.match(output.stdout, /\[felixai\] watching WI-109-1 session=/);
+    assert.match(output.stdout, /tool call shell_command/);
+  } finally {
+    if (originalUserProfile === undefined) {
+      delete process.env.USERPROFILE;
+    } else {
+      process.env.USERPROFILE = originalUserProfile;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 async function main(): Promise<void> {
@@ -2812,7 +3701,11 @@ async function main(): Promise<void> {
   await testNormalizeGitHubIssuesAndSnapshotPersistence();
   await testIssueWaveSelectionPrefersParallelSafeLowOverlapIssues();
   await testIssueRunnerPersistsRunStateAndStopsOnBlockedIssue();
+  await testIssueRunnerDoesNotRetryBlockedJobs();
+  await testCodexSessionTranscriptDiscoveryAndFormatting();
+  await testIssueRunnerFiltersToExplicitIssuesAndStopsAfterFirstRequestedImplementation();
   await testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt();
+  await testLooksLikePlanThenExecuteDirectiveDetectsMixedIntent();
   await testLooksLikeIssueLabelingDirectiveDetectsLabelWork();
   await testClassifyTopLevelInputRoutesKnownCommandsIssuesAndRepoPrompts();
   await testResumeFlow();
@@ -2849,6 +3742,12 @@ async function main(): Promise<void> {
   await testCliForcesProcessExitWhenHandlesRemainOpen();
   await testCliStatusHighlightsBranchDriftFailures();
   await testCliStatusHighlightsStaleRunningWorkItems();
+  await testCliJobListShowsSingleLineSummaries();
+  await testArchiveStaleActiveJobsRemovesOnlyDeadActiveState();
+  await testRunningJobPersistsCodexSessionIdBeforeCompletion();
+  await testCliJobWatchReportsStartupStateWithoutSession();
+  await testCliSessionWatchPrintsTranscriptTail();
+  await testCliJobWatchResolvesRunningSessionTranscript();
   console.log("job manager tests passed");
 }
 

@@ -1,15 +1,15 @@
 # FelixAI Orchestrator
 
-FelixAI Orchestrator is a local CLI-driven orchestration engine for large software tasks. It uses Codex both as the planning brain and the execution engine, while FelixAI manages jobs, isolated workspaces, short-lived branches, state, and resume behavior.
+FelixAI Orchestrator is a local CLI-driven orchestration engine for GitHub issue execution. App planning happens outside FelixAI; FelixAI takes prepared GitHub issues and coordinates Codex sessions, isolated workspaces, short-lived branches, state, and retries until issues are done.
 
 ## What It Does
 
 - Accepts a large engineering task from the CLI
-- Uses Codex to decompose that task into structured work items
-- Creates isolated Git workspaces and short-lived branches per work item
+- Reads prepared GitHub issues as the execution contract
+- Creates isolated Git workspaces and short-lived branches per issue session
 - Launches Codex sessions against those isolated workspaces
 - Persists job, session, and event state under `.felixai/state`
-- Supports boundary-aware manual resume and optional auto-resume
+- Supports issue-level retries and manual intervention
 - Distinguishes resume boundaries from blocked/manual-review execution results
 - Exposes local operational commands for start, resume, status, and listing jobs
 
@@ -20,6 +20,8 @@ FelixAI Orchestrator is a local CLI-driven orchestration engine for large softwa
 - No remote control plane
 - No public auth flows
 - No long-lived environment promotion automation
+- No app planning or feature prioritization
+- No general-purpose repo assistant role as a primary product goal
 
 ## Install
 
@@ -274,15 +276,12 @@ FelixAI can snapshot unfinished GitHub issues for the current repo and ask Codex
 felixai issues snapshot --repo .
 felixai issues plan --repo . --directive "Review unfinished issues and choose the safest implementation order"
 felixai issues run --repo . --directive "Review unfinished issues and start processing them in dependency order"
-felixai review all github issues that are not done and figure out the best order to complete them, then start processing them
-felixai review the github issues, add app-readiness and infrastructure-readiness labels, and report the results
-felixai tell me about this repo
+felixai issues run --repo . --directive "Start processing the prepared GitHub issues in dependency order"
 ```
 
 Issue snapshots, issue plans, and issue-run state are persisted under `.felixai/state/issues/`.
 
-For non-orchestration prompts, FelixAI now falls back to a single Codex repo session and returns the result directly.
-For issue-labeling prompts, Codex returns the label plan and Felix applies the GitHub label mutations itself through the local `gh` CLI.
+FelixAI is most reliable when the repo already has a prepared app plan expressed as well-structured GitHub issues with clear execution metadata, dependencies, and done criteria.
 
 ## GitHub alignment
 

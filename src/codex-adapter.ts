@@ -163,6 +163,7 @@ export class CodexAdapter {
     modelReasoningEffort?: ModelReasoningEffort;
     turboMode?: boolean;
     encourageSubagents?: boolean;
+    onSessionReady?: (sessionId: string) => Promise<void> | void;
   }): Promise<ExecutionResult> {
     const executionPreferences = deriveExecutionPreferences(options.prompt, {
       model: options.model,
@@ -176,6 +177,10 @@ export class CodexAdapter {
           this.getThreadOptions(options.workspacePath, executionPreferences)
         )
       : this.codex.startThread(this.getThreadOptions(options.workspacePath, executionPreferences));
+
+    if (thread.id) {
+      await options.onSessionReady?.(thread.id);
+    }
 
     const input = prependExecutionPolicyHint(
       options.resumePrompt ?? [
@@ -217,6 +222,30 @@ export class CodexAdapter {
     return {
       sessionId: thread.id ?? undefined,
       response: turn.finalResponse
+    };
+  }
+
+  async runStructuredPrompt<T>(options: {
+    prompt: string;
+    workspacePath: string;
+    outputSchema: object;
+    model?: string;
+    modelReasoningEffort?: ModelReasoningEffort;
+    turboMode?: boolean;
+    encourageSubagents?: boolean;
+  }): Promise<{ sessionId?: string; result: T }> {
+    const executionPreferences = deriveExecutionPreferences(options.prompt, {
+      model: options.model,
+      modelReasoningEffort: options.modelReasoningEffort,
+      turboMode: options.turboMode,
+      encourageSubagents: options.encourageSubagents
+    });
+    const thread = this.codex.startThread(this.getThreadOptions(options.workspacePath, executionPreferences));
+    const input = prependExecutionPolicyHint(options.prompt, executionPreferences);
+    const turn = await thread.run(input, { outputSchema: options.outputSchema });
+    return {
+      sessionId: thread.id ?? undefined,
+      result: parseJson<T>(turn.finalResponse)
     };
   }
 

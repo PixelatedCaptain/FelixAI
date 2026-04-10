@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import path from "node:path";
-import readline from "node:readline/promises";
+import readline, { type Interface as ReadlineInterface } from "node:readline/promises";
 
 import { readJsonFile } from "./fs-utils.js";
 import packageJson from "../package.json" with { type: "json" };
@@ -15,16 +15,19 @@ import {
   normalizeCodexModelSlug,
   type CodexModelCatalogEntry
 } from "./codex-models.js";
+import { findCodexSessionTranscript, watchTranscript } from "./codex-sessions.js";
 import { runDoctor } from "./doctor.js";
-import { assertGitRepository, resolveGitRoot } from "./git.js";
+import { assertGitRepository, getPreferredRemote, getRemoteUrl, resolveGitRoot } from "./git.js";
 import { snapshotUnfinishedGitHubIssues } from "./github-issues.js";
 import { addLabelsToGitHubIssue, ensureGitHubLabel } from "./github.js";
 import { initializeProject } from "./init.js";
+import { IntentParser, type PriorIssueAnalysisContext } from "./intent-parser.js";
+import { IssueAnalyst } from "./issue-analyst.js";
 import { IssueLabeler } from "./issue-labeler.js";
-import { classifyTopLevelInput } from "./issue-directives.js";
+import { parseIssueDirectiveScope, type IssueDirectiveScope } from "./issue-directives.js";
 import { IssuePlanner } from "./issue-planner.js";
 import { IssueRunner } from "./issue-runner.js";
-import { saveIssuePlan } from "./issue-state.js";
+import { getIssueRunPath, loadIssueConversation, saveIssueConversation, saveIssuePlan } from "./issue-state.js";
 import { createJobManager } from "./job-manager.js";
 import { loadRepoAgentsPreferences, saveRepoAgentsPreferences } from "./repo-agents.js";
 import type { JobState } from "./types.js";
@@ -35,6 +38,8 @@ function printUsage(): void {
   console.log(`FelixAI Orchestrator
 
 Usage:
+  felixai
+  felixai shell
   felixai auth login
   felixai auth status
   felixai auth logout
@@ -48,9 +53,11 @@ Usage:
   felixai issues snapshot --repo <path> [--json]
   felixai issues plan --repo <path> [--directive "<text>"] [--json]
   felixai issues run --repo <path> [--directive "<text>"] [--json]
+  felixai session watch <session-id> [--raw] [--lines <n>] [--no-follow]
   felixai version
   felixai job start --repo <path> (--task "<large task>" | --task-file <file>) [--base-branch <branch>] [--parallel <n>] [--auto-resume] [--require-clean] [--issue <id>]
   felixai job status <job-id> [--json]
+  felixai job watch <job-id> [--work-item <id>] [--raw] [--lines <n>] [--no-follow]
   felixai job resume <job-id>
   felixai job push <job-id> [--work-item <id>] [--remote <name>]
   felixai job merge <job-id> [--work-item <id>] [--target-branch <branch>] [--json]
@@ -59,6 +66,8 @@ Usage:
   felixai job list [--json]
 
 Examples:
+  felixai
+  felixai shell
   felixai auth login
   felixai auth status
   felixai doctor
@@ -70,8 +79,10 @@ Examples:
   felixai issues snapshot --repo .
   felixai issues plan --repo . --directive "Review unfinished issues and choose the safest implementation order"
   felixai issues run --repo . --directive "Review unfinished issues and start processing them in dependency order"
+  felixai session watch 019d76f8-17ba-7ba3-bb0c-46a7fbe09bb8
   felixai review all github issues and plan the best order
   felixai job start --repo . --task "Build the next milestone"
+  felixai job watch <job-id>
   felixai job start --repo . --task-file ./felixai.task.json --parallel 3 --auto-resume
   felixai job start --repo . --task "Refactor auth" --require-clean
   felixai job start --repo . --task "Implement GH issue" --issue 142 --issue api-hardening
@@ -110,6 +121,19 @@ function parseInteger(value: string | undefined): number | undefined {
 
   const parsed = Number.parseInt(value, 10);
   if (Number.isNaN(parsed) || parsed <= 0) {
+    throw new Error(`Invalid numeric value '${value}'.`);
+  }
+
+  return parsed;
+}
+
+function parseNonNegativeInteger(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed) || parsed < 0) {
     throw new Error(`Invalid numeric value '${value}'.`);
   }
 
@@ -212,12 +236,86 @@ async function resolveRepoRoot(repoPath: string): Promise<string> {
   return resolveGitRoot(repoPath);
 }
 
-async function runNaturalLanguageIssueDirective(command: string, rest: string[]): Promise<void> {
+interface IssueConversationState {
+  repoRoot: string;
+  updatedAt: string;
+  lastIssueAnalysis?: PriorIssueAnalysisContext;
+}
+
+async function loadIssueConversationState(repoRoot: string): Promise<IssueConversationState | undefined> {
+  try {
+    return await loadIssueConversation<IssueConversationState>(repoRoot, repoRoot);
+  } catch {
+    return undefined;
+  }
+}
+
+async function saveIssueConversationState(repoRoot: string, state: IssueConversationState): Promise<void> {
+  await saveIssueConversation(repoRoot, repoRoot, state);
+}
+
+function filterIssuesByScope<T extends { number: number; labels: string[] }>(issues: T[], scope: IssueDirectiveScope): T[] {
+  return issues.filter((issue) => {
+    const matchesIssueNumbers = scope.issueNumbers.length === 0 || scope.issueNumbers.includes(issue.number);
+    const matchesLabels = scope.labelFilters.length === 0 || scope.labelFilters.some((label) => issue.labels.includes(label));
+    return matchesIssueNumbers && matchesLabels;
+  });
+}
+
+async function resolveIntentForPrompt(command: string, rest: string[], repoRoot: string): Promise<{
+  sessionId?: string;
+  intent: Awaited<ReturnType<IntentParser["parse"]>>["intent"];
+}> {
+  const promptText = [command, ...rest].join(" ").trim();
+  const conversation = await loadIssueConversationState(repoRoot);
+  const { snapshot } = await snapshotUnfinishedGitHubIssues(repoRoot, repoRoot);
+  const config = await loadConfig(repoRoot);
+  const repoPreferences = await loadRepoAgentsPreferences(repoRoot);
+  const parser = new IntentParser(config);
+  return parser.parse({
+    userPrompt: promptText,
+    repoRoot,
+    issueSnapshot: snapshot.issues.map((issue) => ({
+      number: issue.number,
+      title: issue.title,
+      labels: issue.labels
+    })),
+    priorIssueAnalysis: conversation?.lastIssueAnalysis,
+    model: repoPreferences?.model,
+    modelReasoningEffort: repoPreferences?.reasoningEffort,
+    turboMode: repoPreferences?.turboMode,
+    encourageSubagents: repoPreferences?.encourageSubagents
+  });
+}
+
+async function runNaturalLanguageIssueDirective(
+  command: string,
+  rest: string[],
+  options?: { scope?: IssueDirectiveScope; requiresConfirmation?: boolean; rl?: ReadlineInterface }
+): Promise<void> {
   const directive = [command, ...rest].join(" ").trim();
   const repoRoot = await resolveRepoRoot(process.cwd());
   await ensureRepoModelPreference(repoRoot);
+  if (options?.requiresConfirmation && process.stdin.isTTY && process.stdout.isTTY) {
+    const plan = await previewIssueExecutionPlan(repoRoot, directive);
+    console.log(`[felixai] proposed issue plan: ${plan.summary}`);
+    for (const item of plan.orderedIssues) {
+      const dependsOn = item.dependsOn.length > 0 ? item.dependsOn.map((issue) => `#${issue}`).join(", ") : "none";
+      console.log(
+        `[felixai] plan #${item.issueNumber}: ${item.title} parallel_safe=${item.parallelSafe ? "yes" : "no"} overlap=${item.overlapRisk} depends_on=${dependsOn}`
+      );
+    }
+    const approved = await promptYesNo("[felixai] Implement this plan now? (yes/no): ", options.rl);
+    if (!approved) {
+      console.log("[felixai] issue plan not executed.");
+      return;
+    }
+  }
+  if (process.stdout.isTTY) {
+    printBusyExecutionNotice(repoRoot, options?.scope);
+  }
   const runner = new IssueRunner(repoRoot);
-  const run = await runner.run({ repoRoot, directive });
+  const run = await runner.run({ repoRoot, directive, scope: options?.scope });
   console.log(`[felixai] issue run: ${run.runPath ?? "saved"}`);
   console.log(`[felixai] status: ${run.status}`);
   console.log(`[felixai] summary: ${run.summary}`);
@@ -225,6 +323,80 @@ async function runNaturalLanguageIssueDirective(command: string, rest: string[])
     console.log(
       `[felixai] issue #${issue.issueNumber}: ${issue.status} jobs=${issue.jobIds.length} parallel_safe=${issue.parallelSafe ? "yes" : "no"} overlap=${issue.overlapRisk}`
     );
+  }
+}
+
+async function runNaturalLanguageIssueAnalysisDirective(
+  command: string,
+  rest: string[],
+  options?: { scope?: IssueDirectiveScope; topN?: number; rl?: ReadlineInterface; autoApproveImplementation?: boolean }
+): Promise<void> {
+  const directive = [command, ...rest].join(" ").trim();
+  const repoRoot = await resolveRepoRoot(process.cwd());
+  await ensureRepoModelPreference(repoRoot);
+  const conversation = await loadIssueConversationState(repoRoot);
+  const { snapshot } = await snapshotUnfinishedGitHubIssues(repoRoot, repoRoot);
+  const scope = options?.scope ?? parseIssueDirectiveScope(command, rest);
+  const filteredIssues = filterIssuesByScope(snapshot.issues, scope);
+  if (filteredIssues.length === 0) {
+    throw new Error("No unfinished GitHub issues matched the requested issue numbers and labels.");
+  }
+
+  const config = await loadConfig(repoRoot);
+  const repoPreferences = await loadRepoAgentsPreferences(repoRoot);
+  const analyst = new IssueAnalyst(config);
+  const analysis = await analyst.analyze({
+    directive,
+    repoRoot,
+    issues: filteredIssues,
+    topN: options?.topN,
+    priorIssueAnalysis: conversation?.lastIssueAnalysis,
+    model: repoPreferences?.model,
+    modelReasoningEffort: repoPreferences?.reasoningEffort,
+    turboMode: repoPreferences?.turboMode,
+    encourageSubagents: repoPreferences?.encourageSubagents
+  });
+
+  await saveIssueConversationState(repoRoot, {
+    repoRoot,
+    updatedAt: new Date().toISOString(),
+    lastIssueAnalysis: {
+      summary: analysis.result.summary,
+      recommendedIssueNumbers: analysis.result.recommendedIssueNumbers,
+      filteredIssueNumbers: filteredIssues.map((issue) => issue.number)
+    }
+  });
+
+  if (analysis.sessionId) {
+    console.log(`[felixai] session: ${analysis.sessionId}`);
+  }
+  console.log(analysis.result.summary);
+  for (const issueNumber of analysis.result.recommendedIssueNumbers) {
+    const issue = filteredIssues.find((entry) => entry.number === issueNumber);
+    if (issue) {
+      console.log(`[felixai] recommended #${issue.number}: ${issue.title}`);
+    }
+  }
+
+  if (analysis.result.isImplementationPlan) {
+    const implementationScope: IssueDirectiveScope = {
+      issueNumbers: analysis.result.implementationIssueNumbers,
+      labelFilters: [],
+      implementFirstOnly: false
+    };
+    const shouldExecute =
+      options?.autoApproveImplementation ??
+      (process.stdin.isTTY && process.stdout.isTTY
+        ? await promptYesNo("[felixai] Implement this now? (yes/no): ", options?.rl)
+        : false);
+
+    if (shouldExecute) {
+      await runNaturalLanguageIssueDirective(command, rest, {
+        scope: implementationScope,
+        requiresConfirmation: false,
+        rl: options?.rl
+      });
+    }
   }
 }
 
@@ -303,15 +475,259 @@ async function runNaturalLanguageRepoPrompt(command: string, rest: string[]): Pr
   console.log(result.response.trim());
 }
 
-async function prompt(question: string): Promise<string> {
-  const rl = readline.createInterface({
+async function prompt(question: string, rl?: ReadlineInterface): Promise<string> {
+  if (rl) {
+    return (await rl.question(question)).trim();
+  }
+
+  const localRl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
   });
   try {
-    return (await rl.question(question)).trim();
+    return (await localRl.question(question)).trim();
   } finally {
-    rl.close();
+    localRl.close();
+  }
+}
+
+async function promptYesNo(question: string, rl?: ReadlineInterface): Promise<boolean> {
+  while (true) {
+    const answer = (await prompt(question, rl)).trim().toLowerCase();
+    if (["y", "yes"].includes(answer)) {
+      return true;
+    }
+    if (["n", "no"].includes(answer)) {
+      return false;
+    }
+    console.log(`[felixai] Invalid selection '${answer}'. Enter yes or no.`);
+  }
+}
+
+async function runSessionWatch(args: string[]): Promise<void> {
+  const sessionId = requireValue(args[0], "Missing session id.");
+  const raw = hasFlag(args, "--raw");
+  const follow = !hasFlag(args, "--no-follow");
+  const lines = parseNonNegativeInteger(getFlagValue(args, "--lines")) ?? 40;
+  const transcriptPath = await findCodexSessionTranscript(sessionId);
+  if (!transcriptPath) {
+    throw new Error(`No Codex transcript was found for session '${sessionId}'.`);
+  }
+
+  console.log(`[felixai] transcript: ${transcriptPath}`);
+  if (follow) {
+    console.log("[felixai] transcript mode: follow");
+  }
+  await watchTranscript(transcriptPath, { raw, follow, lineCount: lines });
+}
+
+async function resolveJobWatchSession(jobId: string, workItemId?: string): Promise<{ workItemId: string; sessionId: string }> {
+  const manager = await createJobManager();
+  const job = await manager.getJob(jobId);
+  const startingItem = job.workItems.find((item) => {
+    if (workItemId && item.id !== workItemId) {
+      return false;
+    }
+    return item.status === "running" && !item.sessionId;
+  });
+  const candidateSessions = job.sessions.filter((session) => {
+    if (!session.sessionId) {
+      return false;
+    }
+    return workItemId ? session.workItemId === workItemId : true;
+  });
+
+  if (candidateSessions.length === 0) {
+    if (startingItem) {
+      throw new Error(
+        workItemId
+          ? `Work item '${workItemId}' is still starting; no Codex session has been established yet.`
+          : `Job '${jobId}' is still starting; no Codex session has been established yet.`
+      );
+    }
+    throw new Error(workItemId ? `No session found for work item '${workItemId}'.` : `No sessions found for job '${jobId}'.`);
+  }
+
+  const preferred =
+    candidateSessions.find((session) => {
+      const item = job.workItems.find((entry) => entry.id === session.workItemId);
+      return item?.status === "running";
+    }) ??
+    candidateSessions.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+
+  return {
+    workItemId: preferred?.workItemId ?? candidateSessions[0]!.workItemId,
+    sessionId: preferred?.sessionId ?? candidateSessions[0]!.sessionId!
+  };
+}
+
+async function runJobWatch(args: string[]): Promise<void> {
+  const jobId = requireValue(args[0], "Missing job id.");
+  const workItemId = getFlagValue(args.slice(1), "--work-item");
+  const raw = hasFlag(args, "--raw");
+  const follow = !hasFlag(args, "--no-follow");
+  const lines = parseNonNegativeInteger(getFlagValue(args, "--lines")) ?? 40;
+  const resolved = await resolveJobWatchSession(jobId, workItemId);
+  console.log(`[felixai] watching ${resolved.workItemId} session=${resolved.sessionId}`);
+  await runSessionWatch([resolved.sessionId, ...(raw ? ["--raw"] : []), ...(follow ? [] : ["--no-follow"]), "--lines", String(lines)]);
+}
+
+function describeIssueExecutionScope(scope: IssueDirectiveScope | undefined): string {
+  if (!scope) {
+    return "full planned issue scope";
+  }
+
+  const parts: string[] = [];
+  if (scope.issueNumbers.length > 0) {
+    parts.push(`issues=${scope.issueNumbers.map((issueNumber) => `#${issueNumber}`).join(", ")}`);
+  }
+  if (scope.labelFilters.length > 0) {
+    parts.push(`labels=${scope.labelFilters.join(", ")}`);
+  }
+  if (scope.implementFirstOnly) {
+    parts.push("mode=first-match-only");
+  }
+
+  return parts.length > 0 ? parts.join(" ") : "full planned issue scope";
+}
+
+function printBusyExecutionNotice(repoRoot: string, scope: IssueDirectiveScope | undefined): void {
+  console.log(`[felixai] execution starting: ${describeIssueExecutionScope(scope)}`);
+  console.log(`[felixai] issue run state: ${getIssueRunPath(repoRoot, repoRoot)}`);
+  console.log("[felixai] shell mode: busy");
+  console.log("[felixai] use another shell for status:");
+  console.log("[felixai]   felixai job list");
+  console.log("[felixai]   felixai job status <job-id>");
+}
+
+function tokenizeShellInput(input: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | undefined;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index] as string;
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+
+  return tokens;
+}
+
+async function previewIssueExecutionPlan(repoRoot: string, directive: string): Promise<{
+  summary: string;
+  orderedIssues: Array<{ issueNumber: number; title: string; dependsOn: number[]; parallelSafe: boolean; overlapRisk: "low" | "medium" | "high" }>;
+}> {
+  const scope = parseIssueDirectiveScope("issues", [directive]);
+  const { snapshot } = await snapshotUnfinishedGitHubIssues(repoRoot, repoRoot);
+  const filteredIssues = snapshot.issues.filter((issue) => {
+    const matchesIssueNumbers = scope.issueNumbers.length === 0 || scope.issueNumbers.includes(issue.number);
+    const matchesLabels = scope.labelFilters.length === 0 || scope.labelFilters.some((label) => issue.labels.includes(label));
+    return matchesIssueNumbers && matchesLabels;
+  });
+
+  if (filteredIssues.length === 0) {
+    throw new Error("No unfinished GitHub issues matched the requested issue numbers and labels.");
+  }
+
+  const config = await loadConfig(repoRoot);
+  const repoPreferences = await loadRepoAgentsPreferences(repoRoot);
+  const planner = new IssuePlanner(config);
+  const plan = await planner.createIssuePlan({
+    directive,
+    repoRoot,
+    issues: filteredIssues,
+    model: repoPreferences?.model,
+    modelReasoningEffort: repoPreferences?.reasoningEffort,
+    turboMode: repoPreferences?.turboMode,
+    encourageSubagents: repoPreferences?.encourageSubagents
+  });
+
+  return plan;
+}
+
+async function printShellHeader(): Promise<void> {
+  try {
+    const repoRoot = await resolveRepoRoot(process.cwd());
+    const preferences = await loadRepoAgentsPreferences(repoRoot);
+    const config = await loadConfig(repoRoot);
+    const { snapshot } = await snapshotUnfinishedGitHubIssues(repoRoot, repoRoot).catch(() => ({ snapshot: undefined as never }));
+    const remoteName = await getPreferredRemote(repoRoot).catch(() => undefined);
+    const remoteUrl = remoteName ? await getRemoteUrl(repoRoot, remoteName).catch(() => undefined) : undefined;
+    const repoLabel = remoteUrl?.replace(/^https:\/\/github\.com\//i, "").replace(/\.git$/i, "") ?? repoRoot;
+    const model = preferences?.model ?? "prompt per repo";
+    const reasoning = preferences?.reasoningEffort ?? config.codex.modelReasoningEffort;
+    const cardWidth = 70;
+    const border = "┌" + "─".repeat(cardWidth - 2) + "┐";
+    const footer = "└" + "─".repeat(cardWidth - 2) + "┘";
+    const line = (label: string, value: string): string => {
+      const content = `${label} ${value}`;
+      const trimmed = content.length > cardWidth - 4 ? `${content.slice(0, cardWidth - 7)}...` : content;
+      return `│ ${trimmed.padEnd(cardWidth - 4, " ")} │`;
+    };
+
+    console.log(border);
+    console.log(line(">_ FelixAI", `(v${packageJson.version})`));
+    console.log(line("model:", `${model} ${reasoning}`.trim()));
+    console.log(line("repo:", repoLabel));
+    if (snapshot) {
+      console.log(line("open issues:", String(snapshot.issues.length)));
+    }
+    console.log(footer);
+  } catch {
+    const config = await loadConfig();
+    const cardWidth = 70;
+    const border = "┌" + "─".repeat(cardWidth - 2) + "┐";
+    const footer = "└" + "─".repeat(cardWidth - 2) + "┘";
+    const line = (label: string, value: string): string =>
+      `│ ${`${label} ${value}`.padEnd(cardWidth - 4, " ")} │`;
+    console.log(border);
+    console.log(line(">_ FelixAI", `(v${packageJson.version})`));
+    console.log(line("model:", `prompt per repo ${config.codex.modelReasoningEffort}`));
+    console.log(line("repo:", "not inside a git repository"));
+    console.log(footer);
+  }
+}
+
+async function reconcileShellStartupJobs(): Promise<void> {
+  try {
+    const repoRoot = await resolveRepoRoot(process.cwd());
+    const manager = await createJobManager();
+    const archived = await manager.archiveStaleActiveJobs({
+      repoRoot,
+      staleAfterMs: 15 * 60_000
+    });
+    if (archived.length > 0) {
+      const jobList = archived.map((job) => job.jobId).join(", ");
+      console.log(`[felixai] archived stale jobs: ${jobList}`);
+    }
+  } catch {
+    // Shell startup should still work outside a repo or if cleanup cannot run.
   }
 }
 
@@ -474,26 +890,79 @@ async function printRepoPreferences(repoRoot: string, options?: { includePath?: 
   }
 }
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+async function startFelixShell(): Promise<void> {
+  await reconcileShellStartupJobs();
+  console.log("[felixai] interactive mode. Type 'exit' to leave.");
+  await printShellHeader();
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  try {
+    while (true) {
+      const line = (await rl.question("felixai> ")).trim();
+      if (!line) {
+        continue;
+      }
+      if (["exit", "quit"].includes(line.toLowerCase())) {
+        return;
+      }
+      if (line.toLowerCase() === "help") {
+        printUsage();
+        continue;
+      }
+
+      try {
+        await handleArgs(tokenizeShellInput(line), rl);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[felixai] ${message}`);
+      }
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+async function handleArgs(args: string[], rl?: ReadlineInterface): Promise<void> {
   const command = args[0];
 
-  if (!command || hasFlag(process.argv, "--help") || hasFlag(process.argv, "-h")) {
+  if (!command || hasFlag(args, "--help") || hasFlag(args, "-h")) {
     printUsage();
     return;
   }
 
   const rest = args.slice(1);
-  const inputClass = classifyTopLevelInput(command, rest);
-  if (inputClass === "issue_labels") {
-    await runNaturalLanguageIssueLabelingDirective(command, rest);
-    return;
-  }
-  if (inputClass === "issue") {
-    await runNaturalLanguageIssueDirective(command, rest);
-    return;
-  }
-  if (inputClass === "repo") {
+  if (!["init", "auth", "doctor", "config", "issues", "session", "version", "job", "shell"].includes(command)) {
+    const repoRoot = await resolveRepoRoot(process.cwd());
+    await ensureRepoModelPreference(repoRoot);
+    const resolved = await resolveIntentForPrompt(command, rest, repoRoot);
+    const scope: IssueDirectiveScope = {
+      issueNumbers: resolved.intent.issueNumbers,
+      labelFilters: resolved.intent.labelFilters,
+      implementFirstOnly: resolved.intent.implementFirstOnly
+    };
+
+    if (resolved.intent.mode === "issue_labeling") {
+      await runNaturalLanguageIssueLabelingDirective(command, rest);
+      return;
+    }
+    if (resolved.intent.mode === "issue_analysis" || resolved.intent.requiresConfirmation) {
+      await runNaturalLanguageIssueAnalysisDirective(command, rest, {
+        scope,
+        topN: resolved.intent.topN,
+        rl
+      });
+      return;
+    }
+    if (resolved.intent.mode === "issue_execution") {
+      await runNaturalLanguageIssueDirective(command, rest, {
+        scope,
+        requiresConfirmation: resolved.intent.requiresConfirmation,
+        rl
+      });
+      return;
+    }
     await runNaturalLanguageRepoPrompt(command, rest);
     return;
   }
@@ -737,6 +1206,17 @@ async function main(): Promise<void> {
           throw new Error(`Unknown issues subcommand '${issuesCommand ?? ""}'. Use 'snapshot', 'plan', or 'run'.`);
       }
     }
+    case "session": {
+      const sessionCommand = rest[0];
+      const sessionArgs = rest.slice(1);
+      switch (sessionCommand) {
+        case "watch":
+          await runSessionWatch(sessionArgs);
+          return;
+        default:
+          throw new Error(`Unknown session subcommand '${sessionCommand ?? ""}'. Use 'watch'.`);
+      }
+    }
     case "version": {
       console.log(`[felixai] version: ${packageJson.version}`);
       console.log("[felixai] config schema version: 1");
@@ -869,10 +1349,25 @@ async function main(): Promise<void> {
                 details.push(`last_signal=${formatDuration(sinceLastUpdate)}_ago`);
                 details.push(`signal=${sinceLastUpdate >= 120_000 ? "stale" : "active"}`);
               }
+              if (session?.changedFilesCount !== undefined) {
+                details.push(`changed_files=${session.changedFilesCount}`);
+              }
+              if (session?.lastWorkspaceActivityAt) {
+                const lastActivity = parseIsoTimestamp(session.lastWorkspaceActivityAt);
+                if (lastActivity !== undefined) {
+                  details.push(`last_file_update=${formatDuration(Date.now() - lastActivity)}_ago`);
+                }
+              }
             }
             const issueInfo = item.issueRefs && item.issueRefs.length > 0 ? ` issues=${item.issueRefs.join(",")}` : "";
             const failureInfo = item.failureCategory ? ` failure=${item.failureCategory} retryable=${item.retryable ? "yes" : "no"}` : "";
             console.log(`[felixai] ${item.id}: ${item.status} ${details.join(" ")}${issueInfo}${failureInfo}`);
+            if (item.status === "running" && session?.recentChangedFiles && session.recentChangedFiles.length > 0) {
+              console.log(`[felixai] ${item.id}: recent_changed=${session.recentChangedFiles.join(", ")}`);
+            }
+            if (item.status === "running" && session?.progressSummary) {
+              console.log(`[felixai] ${item.id}: progress=${session.progressSummary}`);
+            }
           }
           const branchDriftItems = job.workItems.filter((item) => item.status === "failed" && isBranchDriftError(item.error));
           if (branchDriftItems.length > 0) {
@@ -914,6 +1409,10 @@ async function main(): Promise<void> {
               );
             }
           }
+          return;
+        }
+        case "watch": {
+          await runJobWatch(jobArgs);
           return;
         }
         case "resume": {
@@ -1024,14 +1523,14 @@ async function main(): Promise<void> {
           for (const job of jobs) {
             const summary = summarizeJob(job);
             console.log(
-              `${job.jobId}  ${job.status}  branch=${job.baseBranch}  done=${summary.completed}/${job.workItems.length}  running=${summary.running}  failed=${summary.failed}  ${job.task}`
+              `${job.jobId}  ${job.status}  branch=${job.baseBranch}  done=${summary.completed}/${job.workItems.length}  running=${summary.running}  failed=${summary.failed}  ${manager.formatJobListSummary(job)}`
             );
           }
           return;
         }
         default:
           throw new Error(
-            `Unknown job subcommand '${jobCommand ?? ""}'. Use 'start', 'status', 'resume', 'push', 'merge', 'pr', 'resolve-conflicts', or 'list'.`
+            `Unknown job subcommand '${jobCommand ?? ""}'. Use 'start', 'status', 'watch', 'resume', 'push', 'merge', 'pr', 'resolve-conflicts', or 'list'.`
           );
       }
     }
@@ -1039,6 +1538,21 @@ async function main(): Promise<void> {
       printUsage();
       throw new Error(`Unknown command '${command}'.`);
   }
+}
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  if (args.length === 0 && process.stdin.isTTY && process.stdout.isTTY) {
+    await startFelixShell();
+    return;
+  }
+
+  if (args[0] === "shell") {
+    await startFelixShell();
+    return;
+  }
+
+  await handleArgs(args);
 }
 
 main()

@@ -90,6 +90,10 @@ export interface SessionState {
   attemptCount: number;
   lastPrompt?: string;
   lastResponse?: string;
+  progressSummary?: string;
+  changedFilesCount?: number;
+  recentChangedFiles?: string[];
+  lastWorkspaceActivityAt?: string;
   updatedAt: string;
   error?: string;
   failureCategory?: FailureCategory;

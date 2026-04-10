@@ -69,86 +69,86 @@ Make isolated Git workspaces and short-lived branches production-grade enough fo
    Scope:
    Distinguish recoverable vs blocking Git/workspace errors and persist actionable diagnostics into job events and logs.
 
-## Milestone 3: Codex Planning Integration
+## Milestone 3: GitHub Issue Contract Intake
 
 ### Goal
 
-Turn large user tasks into structured work items reliably enough to drive parallel execution.
+Turn prepared GitHub issues into an execution contract that Felix can schedule deterministically.
 
 ### Exit criteria
 
-- planning prompt and schema are stable
-- invalid planner output is handled cleanly
-- dependency graphs are normalized
-- planning artifacts are persisted for later inspection
+- issue metadata contract is documented and enforced
+- invalid or missing dependency metadata is handled cleanly
+- dependency graphs are normalized from issue bodies/labels
+- issue snapshots and normalized execution state are persisted for later inspection
 
 ### Issues
 
-10. Planner prompt contract and output normalization
+10. GitHub issue execution-metadata contract
     Scope:
-    Refine the planner prompt, normalize returned work items, enforce IDs/titles/prompts/dependencies, and reject malformed plans clearly.
+    Define the required issue-body execution metadata Felix expects, including lane, explicit dependencies, and done criteria, and validate it before execution.
 
-11. Dependency graph validation and scheduling rules
+11. Dependency graph validation and scheduling rules from issue metadata
     Scope:
-    Detect duplicate IDs, missing dependencies, circular dependencies, and invalid parallel eligibility before execution begins.
+    Detect missing dependencies, circular dependencies, invalid lane combinations, and invalid parallel eligibility before execution begins.
 
-12. Planning artifacts and inspectability
+12. Issue snapshot artifacts and inspectability
     Scope:
-    Persist raw planner summaries and normalized work-item plans so operators can inspect exactly what Codex proposed.
+    Persist normalized issue snapshots, execution metadata, and scheduling state so operators can inspect exactly what Felix will execute.
 
-## Milestone 4: Multi-Session Execution
+## Milestone 4: Codex CLI Issue Execution
 
 ### Goal
 
-Execute multiple Codex sessions in isolated workspaces with reliable tracking and operator visibility.
+Execute real Codex CLI sessions in isolated workspaces with reliable tracking and operator visibility.
 
 ### Exit criteria
 
 - parallel scheduling respects dependency rules
-- sessions are tracked consistently
+- Codex CLI sessions are tracked consistently
 - job status reflects session reality
 - operators can inspect current work item/session state from the CLI
 
 ### Issues
 
-13. Parallel scheduler and worker coordination
+13. Codex CLI parity for Felix execution sessions
     Scope:
-    Replace the simple fixed-slice executor with a clearer scheduler loop that manages ready queues, in-flight sessions, and dependency-aware dispatch.
+    Replace SDK-only worker execution with a Codex CLI execution path that preserves the operator's local Codex runtime characteristics as closely as possible.
 
 14. Session lifecycle tracking and persistence
     Scope:
-    Capture session IDs, attempts, prompts, summaries, timestamps, and state transitions in a consistent per-work-item model.
+    Capture session IDs, attempts, prompts, summaries, timestamps, and state transitions in a consistent per-issue-session model.
 
 15. CLI inspection improvements for jobs and sessions
     Scope:
-    Expand `job status` and `job list` output so operators can inspect work-item states, session IDs, branch names, and boundary/failure conditions quickly.
+    Expand `job status`, `job list`, and live watch output so operators can inspect issue-session states, session IDs, branch names, and startup/block/failure conditions quickly.
 
-## Milestone 5: Resume and Boundary Handling
+## Milestone 5: Issue Retry and Done-State Handling
 
 ### Goal
 
-Make boundary returns, retries, and resumes operationally trustworthy.
+Make issue retries and done-state checks operationally trustworthy.
 
 ### Exit criteria
 
-- completion vs boundary vs failure is classified consistently
-- auto-resume behavior is configurable and observable
-- manual resume is reliable
-- replacement-session fallback rules are defined even if not fully automated
+- completion vs retry vs blocked is classified consistently
+- issue sessions can be reissued until the issue is actually done
+- GitHub issue state is checked after each session
+- manual intervention remains explicit when an issue cannot move forward
 
 ### Issues
 
-16. Execution result classification and retry policy
+16. Issue-lane retry controller and attempt policy
     Scope:
-    Formalize expected statuses, retryability, manual-review conditions, and operator-facing messaging for completion, boundary, blocked, and failed outcomes.
+    Formalize issue-session retry behavior, operator-facing attempt counts, and escalation rules when progress stalls or the same failure repeats.
 
-17. Auto-resume controller hardening
+17. Done-state checking against GitHub issue state
     Scope:
-    Tighten auto-resume behavior, attempt counting, persisted next prompts, and max-resume enforcement per work item.
+    After each issue session, check whether the issue is actually done using GitHub closure and documented done criteria, and continue or stop accordingly.
 
-18. Manual resume and session continuity UX
+18. Manual intervention and restart UX
     Scope:
-    Improve resume behavior and operator messaging so it is obvious when FelixAI is continuing the same session versus falling back to a new one later.
+    Improve operator messaging so it is obvious when Felix is continuing the same issue, starting a fresh issue session, or waiting for manual intervention.
 
 ## Milestone 6: Merge Readiness and GitHub Alignment
 
@@ -208,42 +208,41 @@ Prepare FelixAI for repeatable local use and an eventual stable MVP release.
     Scope:
     Document and prototype the path from repo-based usage to installable release artifacts for Windows-focused users.
 
-## Milestone 8: Issue-Driven Orchestration
+## Milestone 8: Scoped Issue Orchestration
 
 ### Goal
 
-Let FelixAI accept a natural-language directive, review unfinished GitHub issues through Codex, build an execution order, and then drive issue-by-issue Codex execution until the issues are done.
+Let FelixAI accept an external app plan expressed as well-structured GitHub issues and then drive issue-by-issue Codex execution until the issues are done.
 
 ### Exit criteria
 
-- natural-language CLI intake can start an issue-driven orchestration run
-- unfinished GitHub issues can be fetched and summarized locally
-- Codex can return an issue ordering with dependency and overlap guidance
+- prepared GitHub issues can be fetched and summarized locally
+- issue metadata can drive dependency and overlap scheduling
 - FelixAI can schedule parallel-safe issue waves and sequential dependency chains
-- FelixAI can keep resuming an issue until it reaches a done state
+- FelixAI can keep reissuing Codex CLI issue sessions until an issue reaches a done state
 - repo policy can control aggressive execution settings such as turbo mode and subagent use
 
 ### Issues
 
-26. Natural-language CLI intake for issue-driven runs
+26. Replace mixed natural-language planning flows with explicit issue orchestration entry
     Scope:
-    Add a top-level natural-language CLI entry point that can infer the current repo, capture a freeform orchestration directive, and route it into FelixAI without requiring `job start --repo ... --task ...`.
+    Narrow Felix input handling so the primary path is explicit issue orchestration against prepared GitHub issues, not freeform product planning or recommendation chat.
 
 27. GitHub unfinished-issue discovery and local snapshotting
     Scope:
     Fetch unfinished GitHub issues for the current repo, normalize the issue data FelixAI needs, and persist an inspectable issue snapshot before planning begins.
 
-28. Codex issue-order planning contract
+28. Dependency-aware issue wave scheduler from metadata
     Scope:
-    Define the prompt and schema for asking Codex to review unfinished issues and return an execution order with dependency, overlap-risk, and parallel-safety metadata.
+    Build the scheduler around issue metadata and explicit dependencies so independent issues can run in parallel and ordered issues wait correctly.
 
-29. Issue-wave scheduler for dependency-aware parallel execution
+29. Felix shell/operator model for busy execution plus secondary-shell monitoring
     Scope:
-    Schedule issue execution in safe parallel waves when issues do not overlap, and force sequential processing when Codex marks dependency or overlap risk.
+    Make the main shell intentionally busy during active execution and ensure `job list`, `job status`, and `job watch` in a second shell are reliable and easy to interpret.
 
 30. Repeated issue execution until done
     Scope:
-    Treat a GitHub issue as the durable orchestration unit and keep resuming or reissuing Codex sessions for that issue until FelixAI determines the issue is actually done.
+    Treat a GitHub issue as the durable orchestration unit and keep reissuing Codex CLI sessions for that issue until FelixAI determines the issue is actually done.
 
 31. Repo-scoped execution policy in AGENTS.md
     Scope:

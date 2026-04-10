@@ -65,6 +65,24 @@ export async function isWorkingTreeDirty(repoPath: string): Promise<boolean> {
   return result.stdout.length > 0;
 }
 
+export async function listWorkingTreeChanges(repoPath: string): Promise<string[]> {
+  const result = await runCommand("git", ["-C", repoPath, "status", "--porcelain"]);
+  if (!result.stdout) {
+    return [];
+  }
+
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length >= 4)
+    .map((line) => line.slice(3).trim())
+    .map((line) => {
+      const renameMarker = " -> ";
+      return line.includes(renameMarker) ? line.split(renameMarker).at(-1)?.trim() ?? line : line;
+    })
+    .filter((line) => line.length > 0);
+}
+
 export async function createWorktree(repoPath: string, workspacePath: string, branchName: string, baseBranch: string): Promise<void> {
   if (await branchExists(repoPath, branchName)) {
     await runCommand("git", ["-C", repoPath, "worktree", "add", workspacePath, branchName]);

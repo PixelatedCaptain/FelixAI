@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 
 import { loadConfig } from "./config.js";
 import {
@@ -19,6 +19,7 @@ import {
   isWorkingTreeDirty,
   listConflictedFiles,
   listChangedFiles,
+  listWorkingTreeChanges,
   mergeBranchIntoCurrent,
   pushBranch,
   resolveGitRoot,
@@ -65,6 +66,7 @@ export interface JobManagerDependencies {
     resumePrompt?: string;
     model?: string;
     modelReasoningEffort?: ModelReasoningEffort;
+    onSessionReady?: (sessionId: string) => Promise<void> | void;
   }) => Promise<ExecutionResult>;
   workspaceManager: Pick<WorkspaceManager, "ensureWorkspace">;
   store: StateStore;
@@ -81,6 +83,7 @@ export interface JobManagerDependencies {
   finalizeCompletedWorkItem?: (job: JobState, workItem: WorkItemState) => Promise<{ committed: boolean }>;
   executionHeartbeatMs?: number;
   staleRunningWarningMs?: number;
+  progressReporter?: (message: string) => void;
   resolveRepoContext: (
     repoPath: string,
     requestedBaseBranch?: string,
@@ -116,6 +119,49 @@ function formatDurationFromMilliseconds(durationMs: number): string {
   }
   parts.push(`${seconds}s`);
   return parts.join(" ");
+}
+
+async function getLatestWorkspaceActivityAt(workspacePath: string, changedFiles: string[]): Promise<string | undefined> {
+  let latest: number | undefined;
+  for (const relativePath of changedFiles) {
+    try {
+      const fileStat = await stat(path.join(workspacePath, relativePath));
+      const modified = fileStat.mtime.getTime();
+      if (latest === undefined || modified > latest) {
+        latest = modified;
+      }
+    } catch {
+      // Best-effort only. Missing or deleted files should not break heartbeat persistence.
+    }
+  }
+
+  return latest !== undefined ? new Date(latest).toISOString() : undefined;
+}
+
+async function collectWorkspaceProgress(workspacePath: string): Promise<{
+  changedFilesCount: number;
+  recentChangedFiles: string[];
+  lastWorkspaceActivityAt?: string;
+  progressSummary: string;
+}> {
+  const changedFiles = await listWorkingTreeChanges(workspacePath).catch(() => []);
+  const lastWorkspaceActivityAt = await getLatestWorkspaceActivityAt(workspacePath, changedFiles);
+  const recentChangedFiles = changedFiles.slice(0, 5);
+  const summaryParts = [`changed_files=${changedFiles.length}`];
+  if (recentChangedFiles.length > 0) {
+    summaryParts.push(`recent=${recentChangedFiles.join(", ")}`);
+  }
+  if (lastWorkspaceActivityAt) {
+    const ageMs = Math.max(0, Date.now() - Date.parse(lastWorkspaceActivityAt));
+    summaryParts.push(`last_file_update=${formatDurationFromMilliseconds(ageMs)}_ago`);
+  }
+
+  return {
+    changedFilesCount: changedFiles.length,
+    recentChangedFiles,
+    lastWorkspaceActivityAt,
+    progressSummary: summaryParts.join(" ")
+  };
 }
 
 async function canAutoStageConflictFile(workspacePath: string, relativePath: string): Promise<boolean> {
@@ -260,6 +306,18 @@ function addEvent(job: JobState, level: JobEvent["level"], scope: JobEvent["scop
     updatedAt: timestamp,
     events: [...job.events, { timestamp, level, scope, workItemId, message }]
   };
+}
+
+function summarizeTaskForList(task: string, maxLength = 120): string {
+  const firstMeaningfulLine =
+    task
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? "";
+  if (firstMeaningfulLine.length <= maxLength) {
+    return firstMeaningfulLine;
+  }
+  return `${firstMeaningfulLine.slice(0, maxLength - 3)}...`;
 }
 
 function deriveJobStatus(job: JobState): JobState["status"] {
@@ -417,6 +475,7 @@ export async function createJobManager(projectRoot = process.cwd(), overrides?: 
     workspaceManager,
     store,
     config,
+    progressReporter: overrides?.progressReporter ?? ((message) => console.log(message)),
     analyzeMergeReadiness:
       overrides?.analyzeMergeReadiness ??
       (async (job) => {
@@ -537,6 +596,35 @@ export async function createJobManager(projectRoot = process.cwd(), overrides?: 
 export class JobManager {
   constructor(private readonly deps: JobManagerDependencies) {}
 
+  async archiveStaleActiveJobs(options?: { repoRoot?: string; staleAfterMs?: number }): Promise<JobState[]> {
+    const staleAfterMs = options?.staleAfterMs ?? 15 * 60_000;
+    const cutoff = Date.now() - staleAfterMs;
+    const archived: JobState[] = [];
+    const jobs = await this.deps.store.listJobs();
+
+    for (const job of jobs) {
+      if (options?.repoRoot && path.resolve(job.repoRoot) !== path.resolve(options.repoRoot)) {
+        continue;
+      }
+      if (!["planning", "ready", "running"].includes(job.status)) {
+        continue;
+      }
+
+      const updatedAtMs = isoToMillis(job.updatedAt) ?? 0;
+      if (updatedAtMs > cutoff) {
+        continue;
+      }
+
+      const archivedJob = addEvent(job, "warn", "job", `Archived stale active job after ${formatDurationFromMilliseconds(Date.now() - updatedAtMs)} without updates.`);
+      await this.deps.store.saveJob(archivedJob);
+      if (await this.deps.store.archiveJob(job.jobId)) {
+        archived.push(archivedJob);
+      }
+    }
+
+    return archived.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
   async startJob(request: JobStartRequest): Promise<JobState> {
     const { repoRoot, baseBranch, dirtyWorkingTree } = await this.deps.resolveRepoContext(request.repoPath, request.baseBranch, {
       requireClean: request.requireClean
@@ -641,7 +729,7 @@ export class JobManager {
   }
 
   private getExecutionHeartbeatMs(): number {
-    return this.deps.executionHeartbeatMs ?? 30_000;
+    return this.deps.executionHeartbeatMs ?? 10_000;
   }
 
   private getStaleRunningWarningMs(): number {
@@ -650,6 +738,10 @@ export class JobManager {
 
   async listJobs(): Promise<JobState[]> {
     return this.deps.store.listJobs();
+  }
+
+  formatJobListSummary(job: JobState): string {
+    return summarizeTaskForList(job.task);
   }
 
   async pushJobBranches(jobId: string, options?: { workItemIds?: string[]; remoteName?: string }): Promise<JobState> {
@@ -1163,7 +1255,28 @@ export class JobManager {
             sessionId,
             resumePrompt,
             model: repoInstructions?.model,
-            modelReasoningEffort: repoInstructions?.reasoningEffort
+            modelReasoningEffort: repoInstructions?.reasoningEffort,
+            onSessionReady: async (readySessionId) => {
+              sessionId = readySessionId;
+              updatedItem = {
+                ...updatedItem,
+                sessionId: readySessionId
+              };
+              let currentJob = await this.deps.store.loadJob(jobId);
+              currentJob = updateWorkItem(currentJob, updatedItem);
+              currentJob = updateSession(currentJob, {
+                workItemId: item.id,
+                sessionId: readySessionId,
+                status: "running",
+                workspacePath: workspace.workspacePath,
+                branchName: workspace.branchName,
+                attemptCount: updatedItem.attempts,
+                lastPrompt: resumePrompt ?? item.prompt,
+                updatedAt: now()
+              });
+              currentJob = addEvent(currentJob, "info", "session", `Codex session started: ${readySessionId}`, item.id);
+              await this.deps.store.saveJob(currentJob);
+            }
           });
         } finally {
           clearInterval(heartbeat);
@@ -1243,7 +1356,7 @@ export class JobManager {
           updatedItem.status = "blocked";
           updatedItem.error = result.summary;
           updatedItem.failureCategory = "execution-blocked";
-          updatedItem.retryable = true;
+          updatedItem.retryable = false;
           updatedItem.manualReviewRequired = true;
           job = updateWorkItem(job, updatedItem);
           job = await this.refreshDerivedState(job);
@@ -1260,7 +1373,7 @@ export class JobManager {
             updatedAt: now(),
             error: result.summary,
             failureCategory: "execution-blocked",
-            retryable: true,
+            retryable: false,
             manualReviewRequired: true
           });
           job.status = deriveJobStatus(job);
@@ -1348,6 +1461,8 @@ export class JobManager {
       }
 
       const heartbeatTime = now();
+      const progress = await collectWorkspaceProgress(options.workspacePath);
+      const previousSummary = session.progressSummary;
       job = updateSession(job, {
         ...session,
         sessionId: session.sessionId ?? options.sessionId,
@@ -1355,8 +1470,17 @@ export class JobManager {
         branchName: session.branchName ?? options.branchName,
         attemptCount: options.attemptCount,
         lastPrompt: options.prompt,
+        progressSummary: progress.progressSummary,
+        changedFilesCount: progress.changedFilesCount,
+        recentChangedFiles: progress.recentChangedFiles,
+        lastWorkspaceActivityAt: progress.lastWorkspaceActivityAt,
         updatedAt: heartbeatTime
       });
+
+      if (progress.progressSummary !== previousSummary) {
+        job = addEvent(job, "info", "session", `Progress update: ${progress.progressSummary}`, options.workItemId);
+        this.deps.progressReporter?.(`[felixai] progress ${options.workItemId}: ${progress.progressSummary}`);
+      }
 
       const startedAtMillis = isoToMillis(options.startedAt);
       if (
@@ -1370,6 +1494,11 @@ export class JobManager {
           "session",
           `Execution still running after ${formatDurationFromMilliseconds(Date.now() - startedAtMillis)}. Inspect the workspace if progress appears stalled.`,
           options.workItemId
+        );
+        this.deps.progressReporter?.(
+          `[felixai] warning ${options.workItemId}: execution still running after ${formatDurationFromMilliseconds(
+            Date.now() - startedAtMillis
+          )}`
         );
         options.markWarned();
       }

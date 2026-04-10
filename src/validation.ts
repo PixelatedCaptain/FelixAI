@@ -304,6 +304,18 @@ export function validateJobState(job: JobState): JobState {
     assertEnum(session.status, ["pending", "running", "boundary", "blocked", "completed", "failed"], `Session '${session.workItemId}' has an invalid status.`);
     assertPositiveInteger(session.attemptCount, `Session '${session.workItemId}' attemptCount must be a positive integer.`);
     assertString(session.updatedAt, `Session '${session.workItemId}' updatedAt must be a non-empty string.`);
+    if (session.progressSummary !== undefined) {
+      assertString(session.progressSummary, `Session '${session.workItemId}' progressSummary must be a non-empty string when present.`);
+    }
+    if (session.changedFilesCount !== undefined) {
+      assertNonNegativeInteger(session.changedFilesCount, `Session '${session.workItemId}' changedFilesCount must be a non-negative integer when present.`);
+    }
+    if (session.recentChangedFiles !== undefined) {
+      assertStringArray(session.recentChangedFiles, `Session '${session.workItemId}' recentChangedFiles must be an array of strings when present.`);
+    }
+    if (session.lastWorkspaceActivityAt !== undefined) {
+      assertString(session.lastWorkspaceActivityAt, `Session '${session.workItemId}' lastWorkspaceActivityAt must be a non-empty string when present.`);
+    }
     if (session.failureCategory !== undefined) {
       assertEnum(
         session.failureCategory,

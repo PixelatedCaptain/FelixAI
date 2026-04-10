@@ -1,4 +1,5 @@
 import path from "node:path";
+import { rename } from "node:fs/promises";
 
 import { ensureDirectory, listJsonFiles, pathExists, readJsonFile, writeJsonFile } from "./fs-utils.js";
 import { JobLogger } from "./logger.js";
@@ -9,11 +10,13 @@ export class StateStore {
   private readonly logger: JobLogger;
   private readonly pendingWrites = new Map<string, Promise<void>>();
   private readonly jobsDirPath: string;
+  private readonly archivedJobsDirPath: string;
   private readonly plansDirPath: string;
 
   constructor(projectRoot: string, options: { stateDir: string; logDir: string }) {
     const stateRoot = path.join(path.resolve(projectRoot), options.stateDir);
     this.jobsDirPath = path.join(stateRoot, "jobs");
+    this.archivedJobsDirPath = path.join(stateRoot, "archive", "jobs");
     this.plansDirPath = path.join(stateRoot, "plans");
     this.logger = new JobLogger(path.resolve(projectRoot, options.logDir));
   }
@@ -22,8 +25,13 @@ export class StateStore {
     return this.jobsDirPath;
   }
 
+  get archivedJobsDir(): string {
+    return this.archivedJobsDirPath;
+  }
+
   async ensure(): Promise<void> {
     await ensureDirectory(this.jobsDir);
+    await ensureDirectory(this.archivedJobsDir);
     await ensureDirectory(this.plansDirPath);
     await this.logger.ensure();
   }
@@ -61,6 +69,18 @@ export class StateStore {
     const files = await listJsonFiles(this.jobsDir);
     const jobs = await Promise.all(files.map(async (file) => validateJobState(migrateJobState(await readJsonFile<unknown>(file)))));
     return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async archiveJob(jobId: string): Promise<boolean> {
+    await this.ensure();
+    await this.pendingWrites.get(jobId);
+    const sourcePath = this.getJobPath(jobId);
+    if (!(await pathExists(sourcePath))) {
+      return false;
+    }
+
+    await rename(sourcePath, path.join(this.archivedJobsDir, `${jobId}.json`));
+    return true;
   }
 
   async savePlan(jobId: string, value: unknown): Promise<void> {

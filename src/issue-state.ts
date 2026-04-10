@@ -23,6 +23,10 @@ export function getIssueRunPath(projectRoot: string, repoRoot: string): string {
   return path.join(issueStateRoot(projectRoot), `${hashRepoRoot(repoRoot)}.run.json`);
 }
 
+export function getIssueConversationPath(projectRoot: string, repoRoot: string): string {
+  return path.join(issueStateRoot(projectRoot), `${hashRepoRoot(repoRoot)}.conversation.json`);
+}
+
 export async function saveIssueSnapshot(projectRoot: string, repoRoot: string, value: unknown): Promise<string> {
   const outputPath = getIssueSnapshotPath(projectRoot, repoRoot);
   await ensureDirectory(path.dirname(outputPath));
@@ -44,6 +48,13 @@ export async function saveIssueRun(projectRoot: string, repoRoot: string, value:
   return outputPath;
 }
 
+export async function saveIssueConversation(projectRoot: string, repoRoot: string, value: unknown): Promise<string> {
+  const outputPath = getIssueConversationPath(projectRoot, repoRoot);
+  await ensureDirectory(path.dirname(outputPath));
+  await writeJsonFile(outputPath, value);
+  return outputPath;
+}
+
 export async function loadIssueSnapshot<T>(projectRoot: string, repoRoot: string): Promise<T> {
   return readJsonFile<T>(getIssueSnapshotPath(projectRoot, repoRoot));
 }
@@ -54,4 +65,8 @@ export async function loadIssuePlan<T>(projectRoot: string, repoRoot: string): P
 
 export async function loadIssueRun<T>(projectRoot: string, repoRoot: string): Promise<T> {
   return readJsonFile<T>(getIssueRunPath(projectRoot, repoRoot));
+}
+
+export async function loadIssueConversation<T>(projectRoot: string, repoRoot: string): Promise<T> {
+  return readJsonFile<T>(getIssueConversationPath(projectRoot, repoRoot));
 }

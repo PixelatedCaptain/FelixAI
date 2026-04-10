@@ -1,5 +1,7 @@
 import { runCommand } from "./process-utils.js";
 
+const GITHUB_LABEL_DESCRIPTION_MAX_LENGTH = 100;
+
 function buildEnvWithoutGitHubToken(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env.GITHUB_TOKEN;
@@ -166,6 +168,8 @@ export async function ensureGitHubLabel(options: {
     return;
   }
 
+  const description = truncateGitHubLabelDescription(options.description);
+
   await runGitHubCli(options.repoPath, [
     "label",
     "create",
@@ -173,8 +177,17 @@ export async function ensureGitHubLabel(options: {
     "--color",
     options.color,
     "--description",
-    options.description
+    description
   ]);
+}
+
+export function truncateGitHubLabelDescription(description: string): string {
+  const trimmed = description.trim();
+  if (trimmed.length <= GITHUB_LABEL_DESCRIPTION_MAX_LENGTH) {
+    return trimmed;
+  }
+
+  return `${trimmed.slice(0, GITHUB_LABEL_DESCRIPTION_MAX_LENGTH - 1).trimEnd()}…`;
 }
 
 export async function addLabelsToGitHubIssue(options: {
