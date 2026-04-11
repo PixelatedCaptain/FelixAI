@@ -197,9 +197,10 @@ function inferJobPhase(job: JobState): string | undefined {
 
 function formatJobListBlock(job: JobState, taskSummary: string): string {
   const summary = summarizeJob(job);
-  const primarySessionId =
-    job.sessions.find((session) => session.status === "running")?.sessionId ??
-    job.sessions.find((session) => Boolean(session.sessionId))?.sessionId;
+  const primarySession =
+    job.sessions.find((session) => session.status === "running") ??
+    job.sessions.find((session) => Boolean(session.sessionId));
+  const primarySessionId = primarySession?.sessionId;
   const phase = inferJobPhase(job);
   const issueRefs = job.issueRefs.length > 0 ? job.issueRefs.map((issue) => `#${issue}`).join(", ") : "none";
   const lines = [
@@ -216,6 +217,18 @@ function formatJobListBlock(job: JobState, taskSummary: string): string {
   }
   if (phase) {
     lines.splice(primarySessionId ? 5 : 4, 0, `  Phase: ${phase}`);
+  }
+  if (primarySession?.changedFilesCount !== undefined) {
+    lines.push(`  Changed Files: ${primarySession.changedFilesCount}`);
+  }
+  if (primarySession?.lastWorkspaceActivityAt) {
+    const lastActivity = parseIsoTimestamp(primarySession.lastWorkspaceActivityAt);
+    if (lastActivity !== undefined) {
+      lines.push(`  Last File Update: ${formatDuration(Date.now() - lastActivity)} ago`);
+    }
+  }
+  if (primarySession?.recentChangedFiles && primarySession.recentChangedFiles.length > 0) {
+    lines.push(`  Recent Files: ${primarySession.recentChangedFiles.join(", ")}`);
   }
 
   return lines.join("\n");

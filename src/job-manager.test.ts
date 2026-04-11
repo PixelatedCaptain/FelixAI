@@ -3921,6 +3921,9 @@ async function testCliJobListShowsReadableSessionBlocks(): Promise<void> {
         status: "running",
         attemptCount: 1,
         sessionId: "session-109",
+        changedFilesCount: 3,
+        recentChangedFiles: ["src/Theme.ts", "src/Theme.css", "tests/Theme.test.ts"],
+        lastWorkspaceActivityAt: new Date(Date.now() - 45_000).toISOString(),
         updatedAt: nowIso()
       }
     ],
@@ -3944,6 +3947,9 @@ async function testCliJobListShowsReadableSessionBlocks(): Promise<void> {
   assert.match(output.stdout, /Issues: #109/);
   assert.match(output.stdout, /Session: session-109/);
   assert.match(output.stdout, /Phase: implementation/);
+  assert.match(output.stdout, /Changed Files: 3/);
+  assert.match(output.stdout, /Last File Update: \d+s ago/);
+  assert.match(output.stdout, /Recent Files: src\/Theme\.ts, src\/Theme\.css, tests\/Theme\.test\.ts/);
   assert.match(output.stdout, /Work Items: done=0\/1 running=1 failed=0/);
   assert.match(output.stdout, /Task: GitHub issue #109: Finish remaining secret access-boundary coverage for launch/);
   assert.match(output.stdout, /GitHub issue #109: Finish remaining secret access-boundary coverage for launch/);
