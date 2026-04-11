@@ -123,6 +123,13 @@ function determineIssuePhase(issue: Pick<GitHubIssueRecord, "labels">): IssueExe
   return issueHasLabel(issue, "ready-to-test") ? "validation" : "implementation";
 }
 
+function shouldAdvanceToValidationPhase(
+  completedPhase: IssueExecutionPhase,
+  issue: Pick<GitHubIssueRecord, "labels" | "state">
+): boolean {
+  return completedPhase === "implementation" && issue.state.toUpperCase() === "OPEN" && determineIssuePhase(issue) === "validation";
+}
+
 function hasBlockingRepoChanges(changedFiles: string[]): boolean {
   return changedFiles.some((entry) => {
     const normalized = entry.replace(/\\/g, "/");
@@ -440,12 +447,20 @@ export class IssueRunner {
       }
 
       liveIssue = await fetchIssue(document.repoRoot, issue.issueNumber);
+      if (shouldAdvanceToValidationPhase(phase, liveIssue)) {
+        record = {
+          ...record,
+          phase: "validation",
+          updatedAt: now(),
+          error: undefined
+        };
+        await this.saveIssueRecord(document, record);
+        continue;
+      }
+
       if (this.isIssueComplete(liveIssue)) {
         if (store) {
-          await this.archiveSupersededIssueJobs(store, document.repoRoot, issue.issueNumber, [
-            currentJob.jobId,
-            ...record.jobIds
-          ]);
+          await this.archiveSupersededIssueJobs(store, document.repoRoot, issue.issueNumber, [currentJob.jobId]);
         }
         return {
           ...record,
@@ -524,6 +539,9 @@ export class IssueRunner {
         continue;
       }
       if (keep.has(job.jobId)) {
+        continue;
+      }
+      if (job.status === "planning") {
         continue;
       }
       if (!job.issueRefs.includes(formatIssueRef(issueNumber))) {

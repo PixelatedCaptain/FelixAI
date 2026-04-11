@@ -40,6 +40,10 @@ export class StateStore {
     return path.join(this.jobsDir, `${jobId}.json`);
   }
 
+  getArchivedJobPath(jobId: string): string {
+    return path.join(this.archivedJobsDir, `${jobId}.json`);
+  }
+
   getPlanPath(jobId: string): string {
     return path.join(this.plansDirPath, `${jobId}.plan.json`);
   }
@@ -60,7 +64,10 @@ export class StateStore {
 
   async loadJob(jobId: string): Promise<JobState> {
     await this.pendingWrites.get(jobId);
-    const raw = await readJsonFile<unknown>(this.getJobPath(jobId));
+    const activePath = this.getJobPath(jobId);
+    const archivedPath = this.getArchivedJobPath(jobId);
+    const sourcePath = (await pathExists(activePath)) ? activePath : archivedPath;
+    const raw = await readJsonFile<unknown>(sourcePath);
     return validateJobState(migrateJobState(raw));
   }
 

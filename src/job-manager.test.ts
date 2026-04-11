@@ -1039,16 +1039,16 @@ async function testIssueRunnerTransitionsFromImplementationToValidationPhase(): 
           planningSummary: "summary",
           workItems: [
             {
-              id: "WI-1",
+              id: "issue-attempt",
               title: "phase work",
               prompt: task,
               issueRefs: issueRefs ?? [],
-                dependsOn: [],
-                status: "completed",
-                attempts: 1,
-                branchName: sourceBranch,
-                lastResponse: "done"
-              }
+              dependsOn: [],
+              status: "completed",
+              attempts: 1,
+              branchName: sourceBranch,
+              lastResponse: "done"
+            }
           ],
           sessions: [],
           events: [],
@@ -1346,6 +1346,191 @@ async function testIssueRunnerValidationFinalizesBranchAndArchivesSupersededJobs
   assert.equal((await readFile(path.join(root, "src.txt"), "utf8")).trim(), "validated change");
   assert.equal(await pathExists(path.join(root, ".felixai", "state", "archive", "jobs", "old-running.json")), true);
   assert.equal(await pathExists(path.join(root, ".felixai", "state", "archive", "jobs", "old-failed.json")), true);
+}
+
+async function testIssueRunnerArchivesOlderCompletedJobsButKeepsCurrentJob(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-issue-archive-current-"));
+  await runCommand("git", ["init", "-b", "main"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "felix@example.test"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Felix Tests"], { cwd: root });
+  await writeFile(path.join(root, "AGENTS.md"), "model: gpt-5.4\n", "utf8");
+  await writeFile(path.join(root, "src.txt"), "base\n", "utf8");
+  await runCommand("git", ["add", "AGENTS.md", "src.txt"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "initial"], { cwd: root });
+
+  const sourceBranch = "agent/issue-210/job-current-issue-attempt";
+  await runCommand("git", ["checkout", "-b", sourceBranch], { cwd: root });
+  await writeFile(path.join(root, "src.txt"), "validated change\n", "utf8");
+  await runCommand("git", ["add", "src.txt"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "issue implementation"], { cwd: root });
+  await runCommand("git", ["checkout", "main"], { cwd: root });
+
+  await ensureFelixDirectories(root);
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  await store.saveJob({
+    schemaVersion: 1,
+    jobId: "old-completed",
+    status: "completed",
+    repoPath: root,
+    repoRoot: root,
+    task: "old completed",
+    issueRefs: ["210"],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: false,
+    maxResumesPerItem: 2,
+    workItems: [],
+    sessions: [],
+    events: [],
+    mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+    mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  });
+
+  const managerFactory = (async () =>
+    ({
+      startJob: async ({ task, issueRefs }: { task: string; issueRefs?: string[] }) =>
+        ({
+          schemaVersion: 1,
+          jobId: "job-current",
+          status: "completed",
+          repoPath: root,
+          repoRoot: root,
+          task,
+          issueRefs: issueRefs ?? [],
+          baseBranch: "main",
+          parallelism: 1,
+          autoResume: false,
+          maxResumesPerItem: 2,
+          planningSummary: "summary",
+          workItems: [
+            {
+              id: "issue-attempt",
+              title: "validation work",
+              prompt: task,
+              issueRefs: issueRefs ?? [],
+              dependsOn: [],
+              status: "completed",
+              attempts: 1,
+              branchName: sourceBranch,
+              lastResponse: "validated"
+            }
+          ],
+          sessions: [],
+          events: [],
+          mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+          mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+          remoteBranches: [],
+          pullRequests: [],
+          issueSummaries: [],
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        }) satisfies JobState
+    })) as unknown as typeof createJobManager;
+
+  const runner = new IssueRunner(root, managerFactory, {
+    snapshotter: async () => ({
+      snapshot: {
+        repoRoot: root,
+        generatedAt: nowIso(),
+        issues: [
+          {
+            id: "I_210",
+            number: 210,
+            title: "Archive older jobs safely",
+            body: "## Summary\nBody\n\n## Execution Metadata\n- Lane: ordered\n- Depends on: none\n- Parallel-safe: no\n\n## Done Criteria\n- done",
+            bodySummary: "Body",
+            labels: ["ready-to-test"],
+            assignees: [],
+            state: "OPEN",
+            updatedAt: nowIso(),
+            url: "https://example.test/issues/210",
+            executionMetadata: {
+              lane: "ordered",
+              dependsOn: [],
+              parallelSafe: false,
+              doneChecklistCount: 1,
+              doneChecklistCompletedCount: 0,
+              validationErrors: []
+            }
+          }
+        ]
+      },
+      outputPath: path.join(root, ".felixai", "state", "issues", "snapshot.json")
+    }),
+    fetchIssue: async () => ({
+      id: "I_210",
+      number: 210,
+      title: "Archive older jobs safely",
+      body: "## Done Criteria\n- done",
+      bodySummary: "Body",
+      labels: ["done"],
+      assignees: [],
+      state: "CLOSED",
+      updatedAt: nowIso(),
+      url: "https://example.test/issues/210",
+      executionMetadata: {
+        lane: "ordered",
+        dependsOn: [],
+        parallelSafe: false,
+        doneChecklistCount: 1,
+        doneChecklistCompletedCount: 1,
+        validationErrors: []
+      }
+    }),
+    ensureLabel: async () => {},
+    addIssueLabels: async () => {},
+    removeIssueLabels: async () => {},
+    closeIssue: async () => {}
+  });
+
+  await runner.run({
+    repoRoot: root,
+    directive: "implement github issue #210"
+  });
+
+  assert.equal(await pathExists(path.join(root, ".felixai", "state", "archive", "jobs", "old-completed.json")), true);
+  assert.equal(await pathExists(path.join(root, ".felixai", "state", "jobs", "job-current.json")), true);
+}
+
+async function testStateStoreLoadsArchivedJobs(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-state-archived-load-"));
+  await ensureFelixDirectories(root);
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  const job: JobState = {
+    schemaVersion: 1,
+    jobId: "archived-job",
+    status: "completed",
+    repoPath: root,
+    repoRoot: root,
+    task: "archived task",
+    issueRefs: ["99"],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: false,
+    maxResumesPerItem: 2,
+    workItems: [],
+    sessions: [],
+    events: [],
+    mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+    mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
+
+  await store.saveJob(job);
+  assert.equal(await store.archiveJob(job.jobId), true);
+
+  const loaded = await store.loadJob(job.jobId);
+  assert.equal(loaded.jobId, "archived-job");
+  assert.equal(loaded.status, "completed");
 }
 
 async function testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt(): Promise<void> {
@@ -4092,6 +4277,7 @@ async function main(): Promise<void> {
   await testIssueRunnerFiltersToExplicitIssuesAndStopsAfterFirstRequestedImplementation();
   await testIssueRunnerTransitionsFromImplementationToValidationPhase();
   await testIssueRunnerValidationFinalizesBranchAndArchivesSupersededJobs();
+  await testIssueRunnerArchivesOlderCompletedJobsButKeepsCurrentJob();
   await testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt();
   await testLooksLikePlanThenExecuteDirectiveDetectsMixedIntent();
   await testLooksLikeIssueLabelingDirectiveDetectsLabelWork();
@@ -4132,6 +4318,7 @@ async function main(): Promise<void> {
   await testCliStatusHighlightsStaleRunningWorkItems();
   await testCliJobListShowsSingleLineSummaries();
   await testArchiveStaleActiveJobsRemovesOnlyDeadActiveState();
+  await testStateStoreLoadsArchivedJobs();
   await testRunningJobPersistsCodexSessionIdBeforeCompletion();
   await testCliJobWatchReportsStartupStateWithoutSession();
   await testCliSessionWatchPrintsTranscriptTail();
