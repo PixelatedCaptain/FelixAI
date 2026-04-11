@@ -3856,7 +3856,7 @@ async function testCliStatusHighlightsStaleRunningWorkItems(): Promise<void> {
   assert.match(output.stdout, /\[felixai\] action required: running work item may be stalled/);
 }
 
-async function testCliJobListShowsSingleLineSummaries(): Promise<void> {
+async function testCliJobListShowsReadableSessionBlocks(): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "felix-job-list-summary-"));
   await ensureFelixDirectories(root);
 
@@ -3892,7 +3892,15 @@ async function testCliJobListShowsSingleLineSummaries(): Promise<void> {
         attempts: 1
       }
     ],
-    sessions: [],
+    sessions: [
+      {
+        workItemId: "WI-109-1",
+        status: "running",
+        attemptCount: 1,
+        sessionId: "session-109",
+        updatedAt: nowIso()
+      }
+    ],
     events: [],
     mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
     mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
@@ -3907,6 +3915,13 @@ async function testCliJobListShowsSingleLineSummaries(): Promise<void> {
     cwd: root
   });
 
+  assert.match(output.stdout, /Job ID: 20260410-job-list/);
+  assert.match(output.stdout, /Status: running/);
+  assert.match(output.stdout, /Branch: main/);
+  assert.match(output.stdout, /Issues: #109/);
+  assert.match(output.stdout, /Session: session-109/);
+  assert.match(output.stdout, /Work Items: done=0\/1 running=1 failed=0/);
+  assert.match(output.stdout, /Task: GitHub issue #109: Finish remaining secret access-boundary coverage for launch/);
   assert.match(output.stdout, /GitHub issue #109: Finish remaining secret access-boundary coverage for launch/);
   assert.doesNotMatch(output.stdout, /Operator directive:/);
   assert.doesNotMatch(output.stdout, /Issue body:/);
@@ -4356,7 +4371,7 @@ async function main(): Promise<void> {
   await testCliForcesProcessExitWhenHandlesRemainOpen();
   await testCliStatusHighlightsBranchDriftFailures();
   await testCliStatusHighlightsStaleRunningWorkItems();
-  await testCliJobListShowsSingleLineSummaries();
+  await testCliJobListShowsReadableSessionBlocks();
   await testArchiveStaleActiveJobsRemovesOnlyDeadActiveState();
   await testStateStoreLoadsArchivedJobs();
   await testRunningJobPersistsCodexSessionIdBeforeCompletion();

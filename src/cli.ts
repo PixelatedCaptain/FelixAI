@@ -177,6 +177,28 @@ function summarizeJob(job: JobState): {
   );
 }
 
+function formatJobListBlock(job: JobState, taskSummary: string): string {
+  const summary = summarizeJob(job);
+  const primarySessionId =
+    job.sessions.find((session) => session.status === "running")?.sessionId ??
+    job.sessions.find((session) => Boolean(session.sessionId))?.sessionId;
+  const issueRefs = job.issueRefs.length > 0 ? job.issueRefs.map((issue) => `#${issue}`).join(", ") : "none";
+  const lines = [
+    `Job ID: ${job.jobId}`,
+    `  Status: ${job.status}`,
+    `  Branch: ${job.baseBranch}`,
+    `  Issues: ${issueRefs}`,
+    `  Work Items: done=${summary.completed}/${job.workItems.length} running=${summary.running} failed=${summary.failed}`,
+    `  Task: ${taskSummary}`
+  ];
+
+  if (primarySessionId) {
+    lines.splice(4, 0, `  Session: ${primarySessionId}`);
+  }
+
+  return lines.join("\n");
+}
+
 function isBranchDriftError(message: string | undefined): boolean {
   return typeof message === "string" && /branch drift detected/i.test(message);
 }
@@ -1520,11 +1542,11 @@ async function handleArgs(args: string[], rl?: ReadlineInterface): Promise<void>
             console.log(JSON.stringify(jobs, null, 2));
             return;
           }
-          for (const job of jobs) {
-            const summary = summarizeJob(job);
-            console.log(
-              `${job.jobId}  ${job.status}  branch=${job.baseBranch}  done=${summary.completed}/${job.workItems.length}  running=${summary.running}  failed=${summary.failed}  ${manager.formatJobListSummary(job)}`
-            );
+          for (const [index, job] of jobs.entries()) {
+            if (index > 0) {
+              console.log("");
+            }
+            console.log(formatJobListBlock(job, manager.formatJobListSummary(job)));
           }
           return;
         }

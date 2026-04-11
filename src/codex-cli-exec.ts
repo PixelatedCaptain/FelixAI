@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import type { ExecutionResult } from "./types.js";
-import { resolveSpawnTarget } from "./process-utils.js";
+import { resolveSpawnTarget, terminateProcessTree } from "./process-utils.js";
 import type { ModelReasoningEffort } from "@openai/codex-sdk";
 import type { SandboxMode } from "@openai/codex-sdk";
 
@@ -103,14 +103,10 @@ export async function runCodexCliIssueSession(options: {
           }
           child.stdout.removeAllListeners("data");
           child.stderr.removeAllListeners("data");
-          if (!child.killed) {
-            try {
-              child.kill();
-            } catch {
-              // Best-effort only. The process may have already exited.
-            }
-          }
-          resolve(result);
+          void (async () => {
+            await terminateProcessTree(child.pid);
+            resolve(result);
+          })().catch(reject);
         };
 
         const fail = (error: Error): void => {
@@ -200,11 +196,7 @@ export async function runCodexCliIssueSession(options: {
 
         terminateTimer = setTimeout(() => {
           if (!settled && parsedTerminalResult && !child.killed) {
-            try {
-              child.kill();
-            } catch {
-              // Best-effort only.
-            }
+            void terminateProcessTree(child.pid);
           }
         }, 2_000);
       })().catch(reject);

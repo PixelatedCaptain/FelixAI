@@ -150,3 +150,22 @@ export function runCommandInteractive(
     })().catch(reject);
   });
 }
+
+export async function terminateProcessTree(pid: number | undefined): Promise<void> {
+  if (!pid) {
+    return;
+  }
+
+  if (process.platform === "win32") {
+    await new Promise<void>((resolve) => {
+      execFile("taskkill.exe", ["/pid", String(pid), "/t", "/f"], { encoding: "utf8" }, () => resolve());
+    });
+    return;
+  }
+
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Best-effort only. The process may have already exited.
+  }
+}
