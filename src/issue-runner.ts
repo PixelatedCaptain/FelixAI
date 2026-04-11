@@ -17,6 +17,14 @@ import type { IssuePlanningItem } from "./issue-planner.js";
 import { loadRepoAgentsPreferences } from "./repo-agents.js";
 import { runCodexCliIssueSession } from "./codex-cli-exec.js";
 import { loadConfig } from "./config.js";
+import {
+  checkoutBranch,
+  getCurrentBranch,
+  getPreferredRemote,
+  listWorkingTreeChanges,
+  mergeBranchIntoCurrent,
+  pushBranch
+} from "./git.js";
 import type { JobState } from "./types.js";
 export type IssueExecutionStatus = "pending" | "running" | "blocked" | "completed" | "failed";
 export type IssueRunOverallStatus = "running" | "paused" | "completed" | "failed";
@@ -110,6 +118,13 @@ function issueHasLabel(issue: Pick<GitHubIssueRecord, "labels">, label: string):
 
 function determineIssuePhase(issue: Pick<GitHubIssueRecord, "labels">): IssueExecutionPhase {
   return issueHasLabel(issue, "ready-to-test") ? "validation" : "implementation";
+}
+
+function hasBlockingRepoChanges(changedFiles: string[]): boolean {
+  return changedFiles.some((entry) => {
+    const normalized = entry.replace(/\\/g, "/");
+    return normalized !== "AGENTS.md" && !normalized.startsWith(".felixai/");
+  });
 }
 
 export function selectIssueWave(issues: IssueExecutionRecord[]): IssueExecutionRecord[] {
@@ -395,6 +410,11 @@ export class IssueRunner {
             labels: ["ready-to-test"]
           });
         } else {
+          const finalizedBranch = currentJob.workItems.find((item) => item.id === "issue-attempt")?.branchName;
+          if (!finalizedBranch) {
+            throw new Error("Validation completed but Felix could not determine the source branch for finalization.");
+          }
+          await this.finalizeIssueBranch(document.repoRoot, currentJob.baseBranch, finalizedBranch);
           await githubActions.removeIssueLabels({
             repoPath: document.repoRoot,
             issueNumber: issue.issueNumber,
@@ -456,5 +476,26 @@ export class IssueRunner {
       issues: document.issues.map((issue) => (issue.issueNumber === record.issueNumber ? record : issue))
     };
     await saveIssueRun(this.projectRoot, document.repoRoot, next);
+  }
+
+  private async finalizeIssueBranch(repoRoot: string, baseBranch: string, sourceBranch: string): Promise<void> {
+    const changedFiles = await listWorkingTreeChanges(repoRoot);
+    if (hasBlockingRepoChanges(changedFiles)) {
+      throw new Error(
+        `Cannot finalize '${sourceBranch}' into '${baseBranch}' because the repository root has pending changes outside .felixai/.`
+      );
+    }
+
+    const currentBranch = await getCurrentBranch(repoRoot);
+    if (currentBranch !== baseBranch) {
+      await checkoutBranch(repoRoot, baseBranch);
+    }
+
+    await mergeBranchIntoCurrent(repoRoot, sourceBranch);
+
+    const remoteName = await getPreferredRemote(repoRoot);
+    if (remoteName) {
+      await pushBranch(repoRoot, baseBranch, remoteName);
+    }
   }
 }
