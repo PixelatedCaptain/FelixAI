@@ -656,10 +656,13 @@ async function testIssueRunnerPersistsRunStateAndStopsOnBlockedIssue(): Promise<
           doneChecklistCompletedCount: issueNumber === 101 ? 1 : 0,
           validationErrors: []
         }
-      }),
-      ensureLabel: async () => {}
-    }
-  );
+        }),
+        ensureLabel: async () => {},
+        addIssueLabels: async () => {},
+        removeIssueLabels: async () => {},
+        closeIssue: async () => {}
+      }
+    );
 
   const run = await runner.run({
     repoRoot: root,
@@ -774,8 +777,11 @@ async function testIssueRunnerDoesNotRetryBlockedJobs(): Promise<void> {
           validationErrors: []
         }
       }),
-      ensureLabel: async () => {}
-  });
+        ensureLabel: async () => {},
+        addIssueLabels: async () => {},
+        removeIssueLabels: async () => {},
+        closeIssue: async () => {}
+    });
 
   const run = await runner.run({
     repoRoot: root,
@@ -978,8 +984,11 @@ async function testIssueRunnerFiltersToExplicitIssuesAndStopsAfterFirstRequested
           validationErrors: []
         }
       }),
-      ensureLabel: async () => {}
-  });
+      ensureLabel: async () => {},
+      addIssueLabels: async () => {},
+      removeIssueLabels: async () => {},
+      closeIssue: async () => {}
+    });
 
   const run = await runner.run({
     repoRoot: root,
@@ -996,7 +1005,18 @@ async function testIssueRunnerFiltersToExplicitIssuesAndStopsAfterFirstRequested
 async function testIssueRunnerTransitionsFromImplementationToValidationPhase(): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "felix-issue-phase-"));
   await runCommand("git", ["init", "-b", "main"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "felix@example.test"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Felix Tests"], { cwd: root });
   await writeFile(path.join(root, "AGENTS.md"), "model: gpt-5.4\n", "utf8");
+  await writeFile(path.join(root, "phase.txt"), "base\n", "utf8");
+  await runCommand("git", ["add", "AGENTS.md", "phase.txt"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "initial"], { cwd: root });
+  const sourceBranch = "agent/issue-109/job-phase-issue-attempt";
+  await runCommand("git", ["checkout", "-b", sourceBranch], { cwd: root });
+  await writeFile(path.join(root, "phase.txt"), "validation branch\n", "utf8");
+  await runCommand("git", ["add", "phase.txt"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "phase work"], { cwd: root });
+  await runCommand("git", ["checkout", "main"], { cwd: root });
   await ensureFelixDirectories(root);
 
   const tasks: string[] = [];
@@ -1023,11 +1043,12 @@ async function testIssueRunnerTransitionsFromImplementationToValidationPhase(): 
               title: "phase work",
               prompt: task,
               issueRefs: issueRefs ?? [],
-              dependsOn: [],
-              status: "completed",
-              attempts: 1,
-              lastResponse: "done"
-            }
+                dependsOn: [],
+                status: "completed",
+                attempts: 1,
+                branchName: sourceBranch,
+                lastResponse: "done"
+              }
           ],
           sessions: [],
           events: [],
@@ -1119,8 +1140,11 @@ async function testIssueRunnerTransitionsFromImplementationToValidationPhase(): 
         }
       };
     },
-    ensureLabel: async () => {}
-  });
+      ensureLabel: async () => {},
+      addIssueLabels: async () => {},
+      removeIssueLabels: async () => {},
+      closeIssue: async () => {}
+    });
 
   const run = await runner.run({
     repoRoot: root,
@@ -1133,6 +1157,195 @@ async function testIssueRunnerTransitionsFromImplementationToValidationPhase(): 
   assert.match(tasks[0]!, /add the GitHub label `ready-to-test`/);
   assert.match(tasks[1]!, /Execution phase: validation/);
   assert.match(tasks[1]!, /add the `done` label, and close or move the issue to done/i);
+}
+
+async function testIssueRunnerValidationFinalizesBranchAndArchivesSupersededJobs(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-issue-finalize-"));
+  await runCommand("git", ["init", "-b", "main"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "felix@example.test"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Felix Tests"], { cwd: root });
+  await writeFile(path.join(root, "AGENTS.md"), "model: gpt-5.4\n", "utf8");
+  await writeFile(path.join(root, "src.txt"), "base\n", "utf8");
+  await runCommand("git", ["add", "AGENTS.md", "src.txt"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "initial"], { cwd: root });
+
+  const sourceBranch = "agent/issue-109/job-current-issue-attempt";
+  await runCommand("git", ["checkout", "-b", sourceBranch], { cwd: root });
+  await writeFile(path.join(root, "src.txt"), "validated change\n", "utf8");
+  await runCommand("git", ["add", "src.txt"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "issue implementation"], { cwd: root });
+  await runCommand("git", ["checkout", "main"], { cwd: root });
+
+  await ensureFelixDirectories(root);
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  await store.saveJob({
+    schemaVersion: 1,
+    jobId: "old-running",
+    status: "running",
+    repoPath: root,
+    repoRoot: root,
+    task: "old running",
+    issueRefs: ["109"],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: false,
+    maxResumesPerItem: 2,
+    workItems: [],
+    sessions: [],
+    events: [],
+    mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+    mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  });
+  await store.saveJob({
+    schemaVersion: 1,
+    jobId: "old-failed",
+    status: "failed",
+    repoPath: root,
+    repoRoot: root,
+    task: "old failed",
+    issueRefs: ["109"],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: false,
+    maxResumesPerItem: 2,
+    workItems: [],
+    sessions: [],
+    events: [],
+    mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+    mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  });
+
+  const addLabelCalls: Array<{ issueNumber: number; labels: string[] }> = [];
+  const removeLabelCalls: Array<{ issueNumber: number; labels: string[] }> = [];
+  const closeCalls: Array<{ issueNumber: number; comment?: string }> = [];
+
+  const managerFactory = (async () =>
+    ({
+      startJob: async ({ task, issueRefs }: { task: string; issueRefs?: string[] }) =>
+        ({
+          schemaVersion: 1,
+          jobId: "job-current",
+          status: "completed",
+          repoPath: root,
+          repoRoot: root,
+          task,
+          issueRefs: issueRefs ?? [],
+          baseBranch: "main",
+          parallelism: 1,
+          autoResume: false,
+          maxResumesPerItem: 2,
+          planningSummary: "summary",
+          workItems: [
+            {
+              id: "issue-attempt",
+              title: "validation work",
+              prompt: task,
+              issueRefs: issueRefs ?? [],
+              dependsOn: [],
+              status: "completed",
+              attempts: 1,
+              branchName: sourceBranch,
+              lastResponse: "validated"
+            }
+          ],
+          sessions: [],
+          events: [],
+          mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+          mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+          remoteBranches: [],
+          pullRequests: [],
+          issueSummaries: [],
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        }) satisfies JobState
+    })) as unknown as typeof createJobManager;
+
+  const runner = new IssueRunner(root, managerFactory, {
+    snapshotter: async () => ({
+      snapshot: {
+        repoRoot: root,
+        generatedAt: nowIso(),
+        issues: [
+          {
+            id: "I_109",
+            number: 109,
+            title: "Finalize validated issue",
+            body: "## Summary\nBody\n\n## Execution Metadata\n- Lane: ordered\n- Depends on: none\n- Parallel-safe: no\n\n## Done Criteria\n- done",
+            bodySummary: "Body",
+            labels: ["ready-to-test"],
+            assignees: [],
+            state: "OPEN",
+            updatedAt: nowIso(),
+            url: "https://example.test/issues/109",
+            executionMetadata: {
+              lane: "ordered",
+              dependsOn: [],
+              parallelSafe: false,
+              doneChecklistCount: 1,
+              doneChecklistCompletedCount: 0,
+              validationErrors: []
+            }
+          }
+        ]
+      },
+      outputPath: path.join(root, ".felixai", "state", "issues", "snapshot.json")
+    }),
+    fetchIssue: async () => ({
+      id: "I_109",
+      number: 109,
+      title: "Finalize validated issue",
+      body: "## Done Criteria\n- done",
+      bodySummary: "Body",
+      labels: ["done"],
+      assignees: [],
+      state: "CLOSED",
+      updatedAt: nowIso(),
+      url: "https://example.test/issues/109",
+      executionMetadata: {
+        lane: "ordered",
+        dependsOn: [],
+        parallelSafe: false,
+        doneChecklistCount: 1,
+        doneChecklistCompletedCount: 1,
+        validationErrors: []
+      }
+    }),
+    ensureLabel: async () => {},
+    addIssueLabels: async (options) => {
+      addLabelCalls.push({ issueNumber: options.issueNumber, labels: options.labels });
+    },
+    removeIssueLabels: async (options) => {
+      removeLabelCalls.push({ issueNumber: options.issueNumber, labels: options.labels });
+    },
+    closeIssue: async (options) => {
+      closeCalls.push({ issueNumber: options.issueNumber, comment: options.comment });
+    }
+  });
+
+  const run = await runner.run({
+    repoRoot: root,
+    directive: "implement github issue #109"
+  });
+
+  assert.equal(run.status, "completed");
+  assert.equal(run.issues[0]?.status, "completed");
+  assert.deepEqual(removeLabelCalls, [{ issueNumber: 109, labels: ["ready-to-test"] }]);
+  assert.deepEqual(addLabelCalls, [{ issueNumber: 109, labels: ["done"] }]);
+  assert.equal(closeCalls.length, 1);
+  assert.equal(closeCalls[0]?.issueNumber, 109);
+  assert.equal((await readFile(path.join(root, "src.txt"), "utf8")).trim(), "validated change");
+  assert.equal(await pathExists(path.join(root, ".felixai", "state", "archive", "jobs", "old-running.json")), true);
+  assert.equal(await pathExists(path.join(root, ".felixai", "state", "archive", "jobs", "old-failed.json")), true);
 }
 
 async function testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt(): Promise<void> {
@@ -3878,6 +4091,7 @@ async function main(): Promise<void> {
   await testCodexSessionTranscriptDiscoveryAndFormatting();
   await testIssueRunnerFiltersToExplicitIssuesAndStopsAfterFirstRequestedImplementation();
   await testIssueRunnerTransitionsFromImplementationToValidationPhase();
+  await testIssueRunnerValidationFinalizesBranchAndArchivesSupersededJobs();
   await testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt();
   await testLooksLikePlanThenExecuteDirectiveDetectsMixedIntent();
   await testLooksLikeIssueLabelingDirectiveDetectsLabelWork();

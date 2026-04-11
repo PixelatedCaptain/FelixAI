@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import {
   fetchGitHubIssue,
   snapshotUnfinishedGitHubIssues,
@@ -17,6 +19,7 @@ import type { IssuePlanningItem } from "./issue-planner.js";
 import { loadRepoAgentsPreferences } from "./repo-agents.js";
 import { runCodexCliIssueSession } from "./codex-cli-exec.js";
 import { loadConfig } from "./config.js";
+import { StateStore } from "./state-store.js";
 import {
   checkoutBranch,
   getCurrentBranch,
@@ -167,6 +170,7 @@ export class IssueRunner {
   async run(options: { repoRoot: string; directive: string; scope?: IssueDirectiveScope }): Promise<IssueRunDocument> {
     const repoPreferences = await loadRepoAgentsPreferences(options.repoRoot);
     const config = await loadConfig(this.projectRoot);
+    const store = new StateStore(this.projectRoot, { stateDir: config.stateDir, logDir: config.logDir });
     const scope = options.scope ?? parseIssueDirectiveScope("issues", [options.directive]);
     const snapshotter = this.deps?.snapshotter ?? snapshotUnfinishedGitHubIssues;
     const { snapshot: fullSnapshot, outputPath: snapshotPath } = await snapshotter(this.projectRoot, options.repoRoot);
@@ -304,7 +308,8 @@ export class IssueRunner {
             issueByNumber,
             options.directive,
             repoPreferences,
-            { addIssueLabels, removeIssueLabels, closeIssue }
+            { addIssueLabels, removeIssueLabels, closeIssue },
+            store
           )
         )
       );
@@ -352,7 +357,8 @@ export class IssueRunner {
       addIssueLabels: typeof addLabelsToGitHubIssue;
       removeIssueLabels: typeof removeLabelsFromGitHubIssue;
       closeIssue: typeof closeGitHubIssue;
-    }
+    },
+    store?: StateStore
   ): Promise<IssueExecutionRecord> {
     const issueDetails = issueByNumber.get(issue.issueNumber);
     const fetchIssue = this.deps?.fetchIssue ?? fetchGitHubIssue;
@@ -435,6 +441,12 @@ export class IssueRunner {
 
       liveIssue = await fetchIssue(document.repoRoot, issue.issueNumber);
       if (this.isIssueComplete(liveIssue)) {
+        if (store) {
+          await this.archiveSupersededIssueJobs(store, document.repoRoot, issue.issueNumber, [
+            currentJob.jobId,
+            ...record.jobIds
+          ]);
+        }
         return {
           ...record,
           phase: determineIssuePhase(liveIssue),
@@ -496,6 +508,28 @@ export class IssueRunner {
     const remoteName = await getPreferredRemote(repoRoot);
     if (remoteName) {
       await pushBranch(repoRoot, baseBranch, remoteName);
+    }
+  }
+
+  private async archiveSupersededIssueJobs(
+    store: StateStore,
+    repoRoot: string,
+    issueNumber: number,
+    keepJobIds: string[]
+  ): Promise<void> {
+    const keep = new Set(keepJobIds);
+    const jobs = await store.listJobs();
+    for (const job of jobs) {
+      if (path.resolve(job.repoRoot) !== path.resolve(repoRoot)) {
+        continue;
+      }
+      if (keep.has(job.jobId)) {
+        continue;
+      }
+      if (!job.issueRefs.includes(formatIssueRef(issueNumber))) {
+        continue;
+      }
+      await store.archiveJob(job.jobId);
     }
   }
 }
