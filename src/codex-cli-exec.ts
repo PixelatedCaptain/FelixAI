@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import type { ExecutionResult } from "./types.js";
 import { resolveSpawnTarget } from "./process-utils.js";
 import type { ModelReasoningEffort } from "@openai/codex-sdk";
+import type { SandboxMode } from "@openai/codex-sdk";
 
 const EXECUTION_SCHEMA = {
   type: "object",
@@ -48,6 +49,8 @@ export async function runCodexCliIssueSession(options: {
   workspacePath: string;
   model?: string;
   modelReasoningEffort?: ModelReasoningEffort;
+  sandboxMode?: SandboxMode;
+  networkAccessEnabled?: boolean;
   onSessionReady?: (sessionId: string) => Promise<void> | void;
 }): Promise<ExecutionResult> {
   const schemaDir = await mkdtemp(path.join(os.tmpdir(), "felix-codex-schema-"));
@@ -61,17 +64,24 @@ export async function runCodexCliIssueSession(options: {
   if (options.modelReasoningEffort) {
     args.push("-c", `model_reasoning_effort="${options.modelReasoningEffort}"`);
   }
-  args.push(options.prompt);
+  if (options.sandboxMode) {
+    args.push("-s", options.sandboxMode);
+  }
+  if (options.networkAccessEnabled) {
+    args.push("--search");
+  }
+  args.push("-");
 
   try {
     return await new Promise<ExecutionResult>((resolve, reject) => {
       const env = { ...process.env, OPENAI_API_KEY: "" };
       void (async () => {
-        const target = await resolveSpawnTarget("codex", args, env);
+        const codexCommand = process.platform === "win32" ? "codex.cmd" : "codex";
+        const target = await resolveSpawnTarget(codexCommand, args, env);
         const child = spawn(target.command, target.args, {
           cwd: options.workspacePath,
           env,
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: ["pipe", "pipe", "pipe"],
           shell: false
         });
 
@@ -81,6 +91,9 @@ export async function runCodexCliIssueSession(options: {
 
         child.stdout.setEncoding("utf8");
         child.stderr.setEncoding("utf8");
+
+        child.stdin.setDefaultEncoding("utf8");
+        child.stdin.end(options.prompt);
 
         child.stdout.on("data", (chunk: string) => {
           stdoutBuffer += chunk;

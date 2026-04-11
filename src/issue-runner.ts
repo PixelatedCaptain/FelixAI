@@ -4,13 +4,19 @@ import {
   type GitHubIssueExecutionLane,
   type GitHubIssueRecord
 } from "./github-issues.js";
-import { ensureGitHubLabel } from "./github.js";
+import {
+  addLabelsToGitHubIssue,
+  closeGitHubIssue,
+  ensureGitHubLabel,
+  removeLabelsFromGitHubIssue
+} from "./github.js";
 import { getIssuePlanPath, getIssueRunPath, saveIssuePlan, saveIssueRun } from "./issue-state.js";
 import { createJobManager } from "./job-manager.js";
 import { type IssueDirectiveScope, parseIssueDirectiveScope } from "./issue-directives.js";
 import type { IssuePlanningItem } from "./issue-planner.js";
 import { loadRepoAgentsPreferences } from "./repo-agents.js";
 import { runCodexCliIssueSession } from "./codex-cli-exec.js";
+import { loadConfig } from "./config.js";
 import type { JobState } from "./types.js";
 export type IssueExecutionStatus = "pending" | "running" | "blocked" | "completed" | "failed";
 export type IssueRunOverallStatus = "running" | "paused" | "completed" | "failed";
@@ -137,11 +143,15 @@ export class IssueRunner {
       snapshotter?: typeof snapshotUnfinishedGitHubIssues;
       fetchIssue?: typeof fetchGitHubIssue;
       ensureLabel?: typeof ensureGitHubLabel;
+      addIssueLabels?: typeof addLabelsToGitHubIssue;
+      removeIssueLabels?: typeof removeLabelsFromGitHubIssue;
+      closeIssue?: typeof closeGitHubIssue;
     }
   ) {}
 
   async run(options: { repoRoot: string; directive: string; scope?: IssueDirectiveScope }): Promise<IssueRunDocument> {
     const repoPreferences = await loadRepoAgentsPreferences(options.repoRoot);
+    const config = await loadConfig(this.projectRoot);
     const scope = options.scope ?? parseIssueDirectiveScope("issues", [options.directive]);
     const snapshotter = this.deps?.snapshotter ?? snapshotUnfinishedGitHubIssues;
     const { snapshot: fullSnapshot, outputPath: snapshotPath } = await snapshotter(this.projectRoot, options.repoRoot);
@@ -158,6 +168,9 @@ export class IssueRunner {
       issues: filteredIssues
     };
     const ensureLabel = this.deps?.ensureLabel ?? ensureGitHubLabel;
+    const addIssueLabels = this.deps?.addIssueLabels ?? addLabelsToGitHubIssue;
+    const removeIssueLabels = this.deps?.removeIssueLabels ?? removeLabelsFromGitHubIssue;
+    const closeIssue = this.deps?.closeIssue ?? closeGitHubIssue;
     await ensureLabel({
       repoPath: options.repoRoot,
       name: "ready-to-test",
@@ -246,6 +259,8 @@ export class IssueRunner {
           workspacePath: execution.workspacePath,
           model: repoPreferences?.model,
           modelReasoningEffort: repoPreferences?.reasoningEffort,
+          sandboxMode: config.codex.sandboxMode,
+          networkAccessEnabled: config.codex.networkAccessEnabled,
           onSessionReady: execution.onSessionReady
         })
     });
@@ -266,7 +281,17 @@ export class IssueRunner {
       }
 
       const completedWave = await Promise.all(
-        wave.map((issue) => this.runSingleIssue(manager, document, issue, issueByNumber, options.directive, repoPreferences))
+        wave.map((issue) =>
+          this.runSingleIssue(
+            manager,
+            document,
+            issue,
+            issueByNumber,
+            options.directive,
+            repoPreferences,
+            { addIssueLabels, removeIssueLabels, closeIssue }
+          )
+        )
       );
 
       const updates = new Map(completedWave.map((issue) => [issue.issueNumber, issue]));
@@ -307,7 +332,12 @@ export class IssueRunner {
     issue: IssueExecutionRecord,
     issueByNumber: Map<number, GitHubIssueRecord>,
     directive: string,
-    repoPreferences?: Awaited<ReturnType<typeof loadRepoAgentsPreferences>>
+    repoPreferences?: Awaited<ReturnType<typeof loadRepoAgentsPreferences>>,
+    githubActions?: {
+      addIssueLabels: typeof addLabelsToGitHubIssue;
+      removeIssueLabels: typeof removeLabelsFromGitHubIssue;
+      closeIssue: typeof closeGitHubIssue;
+    }
   ): Promise<IssueExecutionRecord> {
     const issueDetails = issueByNumber.get(issue.issueNumber);
     const fetchIssue = this.deps?.fetchIssue ?? fetchGitHubIssue;
@@ -356,6 +386,32 @@ export class IssueRunner {
         error: currentJob.status === "completed" ? undefined : currentJob.workItems.find((item) => item.error)?.error
       };
       await this.saveIssueRecord(document, record);
+
+      if (currentJob.status === "completed" && githubActions) {
+        if (phase === "implementation") {
+          await githubActions.addIssueLabels({
+            repoPath: document.repoRoot,
+            issueNumber: issue.issueNumber,
+            labels: ["ready-to-test"]
+          });
+        } else {
+          await githubActions.removeIssueLabels({
+            repoPath: document.repoRoot,
+            issueNumber: issue.issueNumber,
+            labels: ["ready-to-test"]
+          });
+          await githubActions.addIssueLabels({
+            repoPath: document.repoRoot,
+            issueNumber: issue.issueNumber,
+            labels: ["done"]
+          });
+          await githubActions.closeIssue({
+            repoPath: document.repoRoot,
+            issueNumber: issue.issueNumber,
+            comment: "Felix validation passed and the issue is complete."
+          });
+        }
+      }
 
       liveIssue = await fetchIssue(document.repoRoot, issue.issueNumber);
       if (this.isIssueComplete(liveIssue)) {
