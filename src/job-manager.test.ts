@@ -3869,6 +3869,7 @@ async function testCliJobListShowsReadableSessionBlocks(): Promise<void> {
     repoRoot: root,
     task: [
       "GitHub issue #109: Finish remaining secret access-boundary coverage for launch",
+      "Execution phase: implementation",
       "",
       "Operator directive: review github issues labeled as app-ready and tell me the top 3 that we should implement now",
       "",
@@ -3920,6 +3921,7 @@ async function testCliJobListShowsReadableSessionBlocks(): Promise<void> {
   assert.match(output.stdout, /Branch: main/);
   assert.match(output.stdout, /Issues: #109/);
   assert.match(output.stdout, /Session: session-109/);
+  assert.match(output.stdout, /Phase: implementation/);
   assert.match(output.stdout, /Work Items: done=0\/1 running=1 failed=0/);
   assert.match(output.stdout, /Task: GitHub issue #109: Finish remaining secret access-boundary coverage for launch/);
   assert.match(output.stdout, /GitHub issue #109: Finish remaining secret access-boundary coverage for launch/);

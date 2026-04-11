@@ -177,11 +177,23 @@ function summarizeJob(job: JobState): {
   );
 }
 
+function inferJobPhase(job: JobState): string | undefined {
+  const candidates = [job.task, ...job.workItems.map((item) => item.prompt)];
+  for (const candidate of candidates) {
+    const match = candidate.match(/Execution phase:\s*(implementation|validation)/i);
+    if (match?.[1]) {
+      return match[1].toLowerCase();
+    }
+  }
+  return undefined;
+}
+
 function formatJobListBlock(job: JobState, taskSummary: string): string {
   const summary = summarizeJob(job);
   const primarySessionId =
     job.sessions.find((session) => session.status === "running")?.sessionId ??
     job.sessions.find((session) => Boolean(session.sessionId))?.sessionId;
+  const phase = inferJobPhase(job);
   const issueRefs = job.issueRefs.length > 0 ? job.issueRefs.map((issue) => `#${issue}`).join(", ") : "none";
   const lines = [
     `Job ID: ${job.jobId}`,
@@ -194,6 +206,9 @@ function formatJobListBlock(job: JobState, taskSummary: string): string {
 
   if (primarySessionId) {
     lines.splice(4, 0, `  Session: ${primarySessionId}`);
+  }
+  if (phase) {
+    lines.splice(primarySessionId ? 5 : 4, 0, `  Phase: ${phase}`);
   }
 
   return lines.join("\n");
