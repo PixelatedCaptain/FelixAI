@@ -37,6 +37,7 @@ import { buildIssueLabelingPrompt, validateIssueLabelingResult } from "./issue-l
 import { buildIssuePlanningPrompt, validateIssuePlanningResult, type GitHubIssueSnapshotItem } from "./issue-planner.js";
 import { IssueRunner, selectIssueWave } from "./issue-runner.js";
 import { initializeProject } from "./init.js";
+import { saveCurrentShellSession } from "./issue-state.js";
 import { createJobManager, JobManager } from "./job-manager.js";
 import { runCommand } from "./process-utils.js";
 import { loadRepoAgentsPreferences, parseRepoAgentsPreferences, saveRepoAgentsPreferences } from "./repo-agents.js";
@@ -3929,6 +3930,73 @@ async function testCliJobListShowsReadableSessionBlocks(): Promise<void> {
   assert.doesNotMatch(output.stdout, /Issue body:/);
 }
 
+async function testCliJobListShowsOnlyCurrentShellSessionJobsByDefault(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-job-list-shell-scope-"));
+  await ensureFelixDirectories(root);
+  await saveCurrentShellSession(root, root, {
+    shellSessionId: "shell-current",
+    repoRoot: root,
+    startedAt: nowIso()
+  });
+
+  await writeJsonFile(path.join(root, ".felixai", "state", "jobs", "job-current.json"), {
+    schemaVersion: 1,
+    jobId: "job-current",
+    shellSessionId: "shell-current",
+    status: "running",
+    repoPath: root,
+    repoRoot: root,
+    task: "Work GitHub issue #130: Theming.",
+    issueRefs: ["130"],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: false,
+    maxResumesPerItem: 2,
+    workItems: [],
+    sessions: [],
+    events: [],
+    mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+    mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  });
+
+  await writeJsonFile(path.join(root, ".felixai", "state", "jobs", "job-old.json"), {
+    schemaVersion: 1,
+    jobId: "job-old",
+    shellSessionId: "shell-old",
+    status: "failed",
+    repoPath: root,
+    repoRoot: root,
+    task: "Work GitHub issue #109: Old failure.",
+    issueRefs: ["109"],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: false,
+    maxResumesPerItem: 2,
+    workItems: [],
+    sessions: [],
+    events: [],
+    mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+    mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  });
+
+  const output = await runCommand(process.execPath, [path.resolve(path.dirname(fileURLToPath(import.meta.url)), "cli.js"), "job", "list"], {
+    cwd: root
+  });
+
+  assert.match(output.stdout, /Job ID: job-current/);
+  assert.doesNotMatch(output.stdout, /Job ID: job-old/);
+}
+
 async function testArchiveStaleActiveJobsRemovesOnlyDeadActiveState(): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "felix-archive-stale-jobs-"));
   await ensureFelixDirectories(root);
@@ -4374,6 +4442,7 @@ async function main(): Promise<void> {
   await testCliStatusHighlightsBranchDriftFailures();
   await testCliStatusHighlightsStaleRunningWorkItems();
   await testCliJobListShowsReadableSessionBlocks();
+  await testCliJobListShowsOnlyCurrentShellSessionJobsByDefault();
   await testArchiveStaleActiveJobsRemovesOnlyDeadActiveState();
   await testStateStoreLoadsArchivedJobs();
   await testRunningJobPersistsCodexSessionIdBeforeCompletion();

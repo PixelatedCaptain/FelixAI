@@ -130,6 +130,9 @@ export function validateJobState(job: JobState): JobState {
   assertRecord(job, "FelixAI job state must be a JSON object.");
   assertPositiveInteger(job.schemaVersion, "Job state schemaVersion must be a positive integer.");
   assertString(job.jobId, "Job state jobId must be a non-empty string.");
+  if (job.shellSessionId !== undefined) {
+    assertString(job.shellSessionId, "Job state shellSessionId must be a non-empty string when present.");
+  }
   assertEnum(job.status, ["planning", "ready", "running", "paused", "completed", "failed"], "Job state status is invalid.");
   assertString(job.repoPath, "Job state repoPath must be a non-empty string.");
   assertString(job.repoRoot, "Job state repoRoot must be a non-empty string.");

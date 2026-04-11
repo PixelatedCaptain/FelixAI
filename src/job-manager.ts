@@ -635,6 +635,7 @@ export class JobManager {
     let job: JobState = {
       schemaVersion: STATE_SCHEMA_VERSION,
       jobId: createJobId(),
+      shellSessionId: request.shellSessionId ?? process.env.FELIXAI_SHELL_SESSION_ID,
       status: "planning",
       repoPath: path.resolve(request.repoPath),
       repoRoot,

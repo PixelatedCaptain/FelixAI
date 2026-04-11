@@ -27,7 +27,14 @@ import { IssueLabeler } from "./issue-labeler.js";
 import { parseIssueDirectiveScope, type IssueDirectiveScope } from "./issue-directives.js";
 import { IssuePlanner } from "./issue-planner.js";
 import { IssueRunner } from "./issue-runner.js";
-import { getIssueRunPath, loadIssueConversation, saveIssueConversation, saveIssuePlan } from "./issue-state.js";
+import {
+  getIssueRunPath,
+  loadCurrentShellSession,
+  loadIssueConversation,
+  saveCurrentShellSession,
+  saveIssueConversation,
+  saveIssuePlan
+} from "./issue-state.js";
 import { createJobManager } from "./job-manager.js";
 import { loadRepoAgentsPreferences, saveRepoAgentsPreferences } from "./repo-agents.js";
 import type { JobState } from "./types.js";
@@ -233,6 +240,10 @@ function formatDuration(durationMs: number): string {
   }
   parts.push(`${seconds}s`);
   return parts.join(" ");
+}
+
+function createShellSessionId(): string {
+  return `shell-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function parseIsoTimestamp(value: string | undefined): number | undefined {
@@ -928,6 +939,14 @@ async function printRepoPreferences(repoRoot: string, options?: { includePath?: 
 }
 
 async function startFelixShell(): Promise<void> {
+  const repoRoot = await resolveRepoRoot(process.cwd());
+  const shellSessionId = createShellSessionId();
+  process.env.FELIXAI_SHELL_SESSION_ID = shellSessionId;
+  await saveCurrentShellSession(process.cwd(), repoRoot, {
+    shellSessionId,
+    repoRoot,
+    startedAt: new Date().toISOString()
+  });
   await reconcileShellStartupJobs();
   console.log("[felixai] interactive mode. Type 'exit' to leave.");
   await printShellHeader();
@@ -957,6 +976,7 @@ async function startFelixShell(): Promise<void> {
       }
     }
   } finally {
+    delete process.env.FELIXAI_SHELL_SESSION_ID;
     rl.close();
   }
 }
@@ -1282,7 +1302,8 @@ async function handleArgs(args: string[], rl?: ReadlineInterface): Promise<void>
             parallelism,
             autoResume,
             requireClean,
-            issueRefs
+            issueRefs,
+            shellSessionId: process.env.FELIXAI_SHELL_SESSION_ID
           });
           console.log(`[felixai] job ${job.jobId} status: ${job.status}`);
           console.log(`[felixai] planner summary: ${job.planningSummary ?? "n/a"}`);
@@ -1557,7 +1578,21 @@ async function handleArgs(args: string[], rl?: ReadlineInterface): Promise<void>
             console.log(JSON.stringify(jobs, null, 2));
             return;
           }
-          for (const [index, job] of jobs.entries()) {
+          const repoRoot = await resolveRepoRoot(process.cwd());
+          let visibleJobs = jobs;
+          try {
+            const currentShell = await loadCurrentShellSession<{ shellSessionId?: string }>(process.cwd(), repoRoot);
+            if (currentShell.shellSessionId) {
+              const matching = jobs.filter((job) => job.shellSessionId === currentShell.shellSessionId);
+              if (matching.length > 0) {
+                visibleJobs = matching;
+              }
+            }
+          } catch {
+            // No current shell marker for this repo; fall back to full history.
+          }
+
+          for (const [index, job] of visibleJobs.entries()) {
             if (index > 0) {
               console.log("");
             }

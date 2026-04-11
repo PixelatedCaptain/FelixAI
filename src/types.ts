@@ -51,6 +51,7 @@ export interface JobStartRequest {
   autoResume?: boolean;
   requireClean?: boolean;
   issueRefs?: string[];
+  shellSessionId?: string;
 }
 
 export interface PlannedWorkItem {
@@ -188,6 +189,7 @@ export interface MergeAutomationState {
 export interface JobState {
   schemaVersion: number;
   jobId: string;
+  shellSessionId?: string;
   status: JobStatus;
   repoPath: string;
   repoRoot: string;
