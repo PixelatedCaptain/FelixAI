@@ -88,6 +88,42 @@ export async function runCodexCliIssueSession(options: {
         let stdoutBuffer = "";
         let stderr = "";
         let lastAgentMessage = "";
+        let parsedTerminalResult: ExecutionResult | undefined;
+        let settled = false;
+        let terminateTimer: NodeJS.Timeout | undefined;
+
+        const finalize = (result: ExecutionResult): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (terminateTimer) {
+            clearTimeout(terminateTimer);
+            terminateTimer = undefined;
+          }
+          child.stdout.removeAllListeners("data");
+          child.stderr.removeAllListeners("data");
+          if (!child.killed) {
+            try {
+              child.kill();
+            } catch {
+              // Best-effort only. The process may have already exited.
+            }
+          }
+          resolve(result);
+        };
+
+        const fail = (error: Error): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (terminateTimer) {
+            clearTimeout(terminateTimer);
+            terminateTimer = undefined;
+          }
+          reject(error);
+        };
 
         child.stdout.setEncoding("utf8");
         child.stderr.setEncoding("utf8");
@@ -113,6 +149,14 @@ export async function runCodexCliIssueSession(options: {
               }
               if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
                 lastAgentMessage = event.item.text;
+                try {
+                  parsedTerminalResult = parseExecutionResult(event.item.text);
+                } catch {
+                  parsedTerminalResult = undefined;
+                }
+              }
+              if (event.type === "task_complete" && parsedTerminalResult) {
+                finalize(parsedTerminalResult);
               }
             } catch {
               // Ignore non-JSON noise; only structured events matter here.
@@ -125,26 +169,44 @@ export async function runCodexCliIssueSession(options: {
         });
 
         child.on("error", (error) => {
-          reject(error);
+          fail(error);
         });
 
         child.on("close", (code) => {
+          if (settled) {
+            return;
+          }
           if (code !== 0) {
-            reject(new Error(stderr.trim() || `codex exec exited with code ${code ?? "unknown"}.`));
+            fail(new Error(stderr.trim() || `codex exec exited with code ${code ?? "unknown"}.`));
+            return;
+          }
+
+          if (parsedTerminalResult) {
+            finalize(parsedTerminalResult);
             return;
           }
 
           if (!lastAgentMessage) {
-            reject(new Error("codex exec completed without a structured final agent message."));
+            fail(new Error("codex exec completed without a structured final agent message."));
             return;
           }
 
           try {
-            resolve(parseExecutionResult(lastAgentMessage));
+            finalize(parseExecutionResult(lastAgentMessage));
           } catch (error) {
-            reject(error instanceof Error ? error : new Error(String(error)));
+            fail(error instanceof Error ? error : new Error(String(error)));
           }
         });
+
+        terminateTimer = setTimeout(() => {
+          if (!settled && parsedTerminalResult && !child.killed) {
+            try {
+              child.kill();
+            } catch {
+              // Best-effort only.
+            }
+          }
+        }, 2_000);
       })().catch(reject);
     });
   } finally {

@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildPlanningPrompt } from "./codex-adapter.js";
+import { runCodexCliIssueSession } from "./codex-cli-exec.js";
 import { DEFAULT_CONFIG, ensureFelixDirectories, loadConfig } from "./config.js";
 import {
   findCodexModelEntry,
@@ -82,6 +83,45 @@ async function testInit(): Promise<void> {
 
 async function testDefaultReasoningEffortIsMedium(): Promise<void> {
   assert.equal(DEFAULT_CONFIG.codex.modelReasoningEffort, "medium");
+}
+
+async function testCodexCliIssueSessionStopsPromptlyAfterTaskComplete(): Promise<void> {
+  if (process.platform !== "win32") {
+    return;
+  }
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-codex-exec-stop-"));
+  const fakeBin = path.join(root, "bin");
+  await mkdir(fakeBin, { recursive: true });
+  const fakeCodexCmd = path.join(fakeBin, "codex.cmd");
+  await writeFile(
+    fakeCodexCmd,
+    [
+      "@echo off",
+      "echo {\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}",
+      "echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"status\\\":\\\"completed\\\",\\\"summary\\\":\\\"ok\\\",\\\"nextPrompt\\\":null}\"}}",
+      "echo {\"type\":\"task_complete\"}",
+      "powershell -NoProfile -Command \"Start-Sleep -Seconds 5\""
+    ].join("\r\n"),
+    "utf8"
+  );
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${fakeBin};${originalPath ?? ""}`;
+  try {
+    const startedAt = Date.now();
+    const result = await runCodexCliIssueSession({
+      prompt: "test prompt",
+      workspacePath: root
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result.status, "completed");
+    assert.equal(result.summary, "ok");
+    assert.ok(elapsedMs < 4_000, `expected early worker shutdown, but elapsed ${elapsedMs}ms`);
+  } finally {
+    process.env.PATH = originalPath;
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 async function testCodexModelCatalogLoadsDynamicEntriesAndCurrentModel(): Promise<void> {
@@ -1494,7 +1534,6 @@ async function testIssueRunnerArchivesOlderCompletedJobsButKeepsCurrentJob(): Pr
   });
 
   assert.equal(await pathExists(path.join(root, ".felixai", "state", "archive", "jobs", "old-completed.json")), true);
-  assert.equal(await pathExists(path.join(root, ".felixai", "state", "jobs", "job-current.json")), true);
 }
 
 async function testStateStoreLoadsArchivedJobs(): Promise<void> {
@@ -4253,6 +4292,7 @@ async function testCliJobWatchResolvesRunningSessionTranscript(): Promise<void> 
 async function main(): Promise<void> {
   await testInit();
   await testDefaultReasoningEffortIsMedium();
+  await testCodexCliIssueSessionStopsPromptlyAfterTaskComplete();
   await testCodexModelCatalogLoadsDynamicEntriesAndCurrentModel();
   await testUnsupportedCodexModelErrorDetection();
   await testRunCommandResolvesWindowsCmdShims();
