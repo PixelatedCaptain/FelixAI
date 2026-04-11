@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import type { ExecutionResult } from "./types.js";
+import { resolveSpawnTarget } from "./process-utils.js";
 import type { ModelReasoningEffort } from "@openai/codex-sdk";
 
 const EXECUTION_SCHEMA = {
@@ -65,70 +66,73 @@ export async function runCodexCliIssueSession(options: {
   try {
     return await new Promise<ExecutionResult>((resolve, reject) => {
       const env = { ...process.env, OPENAI_API_KEY: "" };
-      const child = spawn("codex", args, {
-        cwd: options.workspacePath,
-        env,
-        stdio: ["ignore", "pipe", "pipe"],
-        shell: false
-      });
+      void (async () => {
+        const target = await resolveSpawnTarget("codex", args, env);
+        const child = spawn(target.command, target.args, {
+          cwd: options.workspacePath,
+          env,
+          stdio: ["ignore", "pipe", "pipe"],
+          shell: false
+        });
 
-      let stdoutBuffer = "";
-      let stderr = "";
-      let lastAgentMessage = "";
+        let stdoutBuffer = "";
+        let stderr = "";
+        let lastAgentMessage = "";
 
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
 
-      child.stdout.on("data", (chunk: string) => {
-        stdoutBuffer += chunk;
-        const lines = stdoutBuffer.split(/\r?\n/);
-        stdoutBuffer = lines.pop() ?? "";
+        child.stdout.on("data", (chunk: string) => {
+          stdoutBuffer += chunk;
+          const lines = stdoutBuffer.split(/\r?\n/);
+          stdoutBuffer = lines.pop() ?? "";
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) {
-            continue;
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) {
+              continue;
+            }
+
+            try {
+              const event = JSON.parse(trimmed) as CodexJsonEvent;
+              if (event.type === "thread.started" && event.thread_id) {
+                void options.onSessionReady?.(event.thread_id);
+              }
+              if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
+                lastAgentMessage = event.item.text;
+              }
+            } catch {
+              // Ignore non-JSON noise; only structured events matter here.
+            }
+          }
+        });
+
+        child.stderr.on("data", (chunk: string) => {
+          stderr += chunk;
+        });
+
+        child.on("error", (error) => {
+          reject(error);
+        });
+
+        child.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr.trim() || `codex exec exited with code ${code ?? "unknown"}.`));
+            return;
+          }
+
+          if (!lastAgentMessage) {
+            reject(new Error("codex exec completed without a structured final agent message."));
+            return;
           }
 
           try {
-            const event = JSON.parse(trimmed) as CodexJsonEvent;
-            if (event.type === "thread.started" && event.thread_id) {
-              void options.onSessionReady?.(event.thread_id);
-            }
-            if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
-              lastAgentMessage = event.item.text;
-            }
-          } catch {
-            // Ignore non-JSON noise; only structured events matter here.
+            resolve(parseExecutionResult(lastAgentMessage));
+          } catch (error) {
+            reject(error instanceof Error ? error : new Error(String(error)));
           }
-        }
-      });
-
-      child.stderr.on("data", (chunk: string) => {
-        stderr += chunk;
-      });
-
-      child.on("error", (error) => {
-        reject(error);
-      });
-
-      child.on("close", (code) => {
-        if (code !== 0) {
-          reject(new Error(stderr.trim() || `codex exec exited with code ${code ?? "unknown"}.`));
-          return;
-        }
-
-        if (!lastAgentMessage) {
-          reject(new Error("codex exec completed without a structured final agent message."));
-          return;
-        }
-
-        try {
-          resolve(parseExecutionResult(lastAgentMessage));
-        } catch (error) {
-          reject(error instanceof Error ? error : new Error(String(error)));
-        }
-      });
+        });
+      })().catch(reject);
     });
   } finally {
     await rm(schemaDir, { recursive: true, force: true });

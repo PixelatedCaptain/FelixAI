@@ -78,7 +78,7 @@ async function resolveWindowsCommand(command: string, env?: NodeJS.ProcessEnv): 
   }
 }
 
-async function resolveSpawnTarget(command: string, args: string[], env?: NodeJS.ProcessEnv): Promise<SpawnTarget> {
+export async function resolveSpawnTarget(command: string, args: string[], env?: NodeJS.ProcessEnv): Promise<SpawnTarget> {
   if (process.platform !== "win32") {
     return { command, args };
   }
