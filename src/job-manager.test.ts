@@ -878,7 +878,7 @@ async function testCodexSessionTranscriptDiscoveryAndFormatting(): Promise<void>
     const tail = await readTranscriptTail(transcriptPath, 2);
     assert.equal(tail.length, 2);
     assert.match(formatTranscriptLine(tail[0]!), /tool call shell_command/);
-    assert.match(formatTranscriptLine(tail[1]!), /tool output Exit code: 0/);
+    assert.match(formatTranscriptLine(tail[1]!), /tool output exit=0/);
   } finally {
     if (originalUserProfile === undefined) {
       delete process.env.USERPROFILE;
@@ -887,6 +887,27 @@ async function testCodexSessionTranscriptDiscoveryAndFormatting(): Promise<void>
     }
     await rm(root, { recursive: true, force: true });
   }
+}
+
+async function testTranscriptFormatterHandlesDirectResponseItemsAndSuppressesRawNoise(): Promise<void> {
+  const colonPrefixedReasoning = ':{"type":"reasoning","summary":[],"content":null,"encrypted_content":"secret"}';
+  const directToolOutput = JSON.stringify({
+    type: "function_call_output",
+    output: "Exit code: 0\r\nWall time: 0.9 seconds\r\nOutput:\r\nsrc\\\\SettingsPage.razor:15:            <select class=\\\"field\\\">\r\nsrc\\\\Other.cs:10: ok\r\n"
+  });
+  const directToolCall = JSON.stringify({
+    timestamp: "2026-04-11T19:35:13.435Z",
+    type: "function_call",
+    name: "shell_command"
+  });
+
+  assert.equal(formatTranscriptLine(colonPrefixedReasoning), "[unknown-time] reasoning");
+  assert.equal(formatTranscriptLine(directToolCall), "[2026-04-11T19:35:13.435Z] tool call shell_command");
+  assert.match(
+    formatTranscriptLine(directToolOutput),
+    /\[unknown-time\] tool output exit=0 src\\\\SettingsPage\.razor:15:/
+  );
+  assert.doesNotMatch(formatTranscriptLine(colonPrefixedReasoning), /encrypted_content|secret/);
 }
 
 async function testIssueRunnerFiltersToExplicitIssuesAndStopsAfterFirstRequestedImplementation(): Promise<void> {
@@ -4399,6 +4420,7 @@ async function main(): Promise<void> {
   await testIssueRunnerPersistsRunStateAndStopsOnBlockedIssue();
   await testIssueRunnerDoesNotRetryBlockedJobs();
   await testCodexSessionTranscriptDiscoveryAndFormatting();
+  await testTranscriptFormatterHandlesDirectResponseItemsAndSuppressesRawNoise();
   await testIssueRunnerFiltersToExplicitIssuesAndStopsAfterFirstRequestedImplementation();
   await testIssueRunnerTransitionsFromImplementationToValidationPhase();
   await testIssueRunnerValidationFinalizesBranchAndArchivesSupersededJobs();

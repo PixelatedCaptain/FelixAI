@@ -53,6 +53,24 @@ function clip(value: string, max = 180): string {
   return `${value.slice(0, max - 3)}...`;
 }
 
+function parseTranscriptJson(line: string): unknown {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) {
+    throw new Error("Empty transcript line.");
+  }
+
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    return JSON.parse(trimmed);
+  }
+
+  const firstBraceIndex = trimmed.indexOf("{");
+  if (firstBraceIndex >= 0) {
+    return JSON.parse(trimmed.slice(firstBraceIndex));
+  }
+
+  throw new Error("Transcript line is not JSON.");
+}
+
 function extractMessageText(payload: unknown): string | undefined {
   if (!payload || typeof payload !== "object") {
     return undefined;
@@ -65,55 +83,135 @@ function extractMessageText(payload: unknown): string | undefined {
   return text?.trim();
 }
 
+function readTimestamp(value: Record<string, unknown>): string {
+  return typeof value.timestamp === "string" ? value.timestamp : "unknown-time";
+}
+
+function readString(value: Record<string, unknown>, key: string): string | undefined {
+  const candidate = value[key];
+  return typeof candidate === "string" ? candidate : undefined;
+}
+
+function summarizeToolOutput(output: string): string {
+  const lines = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    return "[no output]";
+  }
+
+  const exitLine = lines.find((line) => /^Exit code:\s+/i.test(line));
+  const exitCode = exitLine?.match(/^Exit code:\s+(.+)$/i)?.[1]?.trim();
+  const contentLines = lines.filter((line) => !/^Exit code:\s+/i.test(line) && !/^Wall time:\s+/i.test(line) && line !== "Output:");
+  const firstContent = contentLines[0];
+
+  if (exitCode && firstContent) {
+    if (contentLines.length > 1) {
+      return `exit=${exitCode} ${clip(firstContent)} (+${contentLines.length - 1} more lines)`;
+    }
+    return `exit=${exitCode} ${clip(firstContent)}`;
+  }
+
+  if (exitCode) {
+    return `exit=${exitCode}`;
+  }
+
+  if (contentLines.length > 1) {
+    return `${clip(contentLines[0]!)} (+${contentLines.length - 1} more lines)`;
+  }
+
+  return clip(contentLines[0]!);
+}
+
+function formatDirectResponseItem(item: Record<string, unknown>, timestamp: string): string | undefined {
+  const itemType = readString(item, "type") ?? "item";
+
+  if (itemType === "message") {
+    const role = readString(item, "role") ?? "message";
+    const text = extractMessageText(item) ?? "[no text]";
+    return `[${timestamp}] ${role}: ${clip(text)}`;
+  }
+
+  if (itemType === "reasoning") {
+    return `[${timestamp}] reasoning`;
+  }
+
+  if (itemType === "function_call") {
+    const name = readString(item, "name") ?? "tool";
+    return `[${timestamp}] tool call ${name}`;
+  }
+
+  if (itemType === "function_call_output") {
+    const output = readString(item, "output") ?? "";
+    return `[${timestamp}] tool output ${summarizeToolOutput(output)}`;
+  }
+
+  if (itemType === "event_msg") {
+    const eventType = readString(item, "type") ?? "event";
+    return `[${timestamp}] event ${clip(eventType)}`;
+  }
+
+  return `[${timestamp}] item ${clip(itemType)}`;
+}
+
 export function formatTranscriptLine(line: string): string {
   try {
-    const parsed = JSON.parse(line) as {
-      timestamp?: string;
-      type?: string;
-      payload?: Record<string, unknown>;
-    };
-    const timestamp = parsed.timestamp ?? "unknown-time";
-    const type = parsed.type ?? "unknown";
-    const payload = parsed.payload ?? {};
+    const parsed = parseTranscriptJson(line);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return clip(line);
+    }
+
+    const parsedObject = parsed as Record<string, unknown>;
+    const timestamp = readTimestamp(parsedObject);
+    const type = readString(parsedObject, "type") ?? "unknown";
+    const payload = (parsedObject.payload && typeof parsedObject.payload === "object" && !Array.isArray(parsedObject.payload)
+      ? (parsedObject.payload as Record<string, unknown>)
+      : {}) as Record<string, unknown>;
 
     if (type === "session_meta") {
-      const id = typeof payload.id === "string" ? payload.id : "unknown";
-      const cwd = typeof payload.cwd === "string" ? payload.cwd : "unknown";
-      const model = typeof payload["model_slug"] === "string" ? payload["model_slug"] : undefined;
+      const id = readString(payload, "id") ?? "unknown";
+      const cwd = readString(payload, "cwd") ?? "unknown";
+      const model = readString(payload, "model_slug");
       const summary = model ? `session ${id} cwd=${cwd} model=${model}` : `session ${id} cwd=${cwd}`;
       return `[${timestamp}] meta ${clip(summary)}`;
     }
 
     if (type === "event_msg") {
-      const eventType = typeof payload.type === "string" ? payload.type : "event";
+      const eventType = readString(payload, "type") ?? "event";
       return `[${timestamp}] event ${clip(eventType)}`;
     }
 
     if (type === "response_item") {
-      const itemType = typeof payload.type === "string" ? payload.type : "item";
-      if (itemType === "message") {
-        const role = typeof payload.role === "string" ? payload.role : "message";
-        const text = extractMessageText(payload) ?? "";
-        return `[${timestamp}] ${role}: ${clip(text || "[no text]")}`;
-      }
-      if (itemType === "reasoning") {
-        return `[${timestamp}] reasoning`;
-      }
-      if (itemType === "function_call") {
-        const name = typeof payload.name === "string" ? payload.name : "tool";
-        return `[${timestamp}] tool call ${name}`;
-      }
-      if (itemType === "function_call_output") {
-        const output = typeof payload.output === "string" ? payload.output : "";
-        const firstLine = output.split(/\r?\n/).find((entry) => entry.trim().length > 0) ?? "[no output]";
-        return `[${timestamp}] tool output ${clip(firstLine)}`;
-      }
-      return `[${timestamp}] item ${clip(itemType)}`;
+      return formatDirectResponseItem(payload, timestamp) ?? `[${timestamp}] item`;
+    }
+
+    if (type === "turn_context") {
+      return `[${timestamp}] turn_context`;
+    }
+
+    if (type === "user") {
+      const text = readString(parsedObject, "text") ?? readString(parsedObject, "message") ?? "[user input]";
+      return `[${timestamp}] user: ${clip(text)}`;
+    }
+
+    if (type === "assistant") {
+      const text = readString(parsedObject, "text") ?? readString(parsedObject, "message") ?? "[assistant output]";
+      return `[${timestamp}] assistant: ${clip(text)}`;
+    }
+
+    if (["message", "reasoning", "function_call", "function_call_output"].includes(type)) {
+      return formatDirectResponseItem(parsedObject, timestamp) ?? `[${timestamp}] item ${clip(type)}`;
+    }
+
+    if (type === "token_count") {
+      return `[${timestamp}] event token_count`;
     }
 
     return `[${timestamp}] ${clip(type)}`;
   } catch {
-    return line;
+    return clip(line);
   }
 }
 
