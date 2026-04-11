@@ -247,25 +247,27 @@ function buildInstructionAwareTask(
 
   return [
     `Repository instructions file: ${repoInstructions.path}`,
-    "Apply these repository-specific instructions throughout this planning session unless the user explicitly overrides them.",
-    repoInstructions.content,
-    "",
+    "Read and follow that file during this planning session unless the user explicitly overrides it.",
     `Task: ${task}`
   ].join("\n");
 }
 
-function buildInstructionAwarePrompt(prompt: string, repoInstructions: { path: string; content: string } | undefined): string {
-  if (!repoInstructions) {
-    return prompt;
+function buildInstructionAwarePrompt(
+  prompt: string,
+  repoInstructions: { path: string; content: string } | undefined,
+  branchName?: string
+): string {
+  const lines: string[] = [];
+  if (repoInstructions) {
+    lines.push(`Repository instructions file: ${repoInstructions.path}`);
+    lines.push("Read and follow that file during this work item unless the user explicitly overrides it.");
   }
-
-  return [
-    `Repository instructions file: ${repoInstructions.path}`,
-    "Apply these repository-specific instructions throughout this work item unless the user explicitly overrides them.",
-    repoInstructions.content,
-    "",
-    prompt
-  ].join("\n");
+  if (branchName) {
+    lines.push(`Dedicated branch for this work item: ${branchName}`);
+    lines.push("Work only on that branch for this issue/session.");
+  }
+  lines.push(prompt);
+  return lines.join("\n\n");
 }
 
 function jobToken(jobId: string): string {
@@ -1249,7 +1251,7 @@ export class JobManager {
         let result: ExecutionResult;
         try {
           result = await this.deps.executor({
-            prompt: buildInstructionAwarePrompt(item.prompt, repoInstructions),
+            prompt: buildInstructionAwarePrompt(item.prompt, repoInstructions, workspace.branchName),
             workspacePath: workspace.workspacePath,
             branchName: workspace.branchName,
             sessionId,

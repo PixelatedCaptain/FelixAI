@@ -1429,11 +1429,12 @@ async function testStartJobLoadsRepoAgentsInstructionsAndPassesThemToPlannerAndE
   });
 
   assert.match(plannerInstructions ?? "", /Repository instructions file: .*AGENTS\.md/);
-  assert.match(plannerInstructions ?? "", /Use snake_case helpers and keep tests updated\./);
+  assert.match(plannerInstructions ?? "", /Read and follow that file during this planning session/i);
   assert.match(plannerInstructions ?? "", /Task: Apply change/);
   assert.deepEqual(plannerPreferences, { model: "gpt-5.4", modelReasoningEffort: "high" });
   assert.match(executorInstructions ?? "", /Repository instructions file: .*AGENTS\.md/);
-  assert.match(executorInstructions ?? "", /Use snake_case helpers and keep tests updated\./);
+  assert.match(executorInstructions ?? "", /Read and follow that file during this work item/i);
+  assert.match(executorInstructions ?? "", /Dedicated branch for this work item:/);
   assert.match(executorInstructions ?? "", /Do the work/);
   assert.deepEqual(executorPreferences, { model: "gpt-5.4", modelReasoningEffort: "high" });
   assert.equal(job.events.some((event) => /Loaded repository instructions/.test(event.message)), true);

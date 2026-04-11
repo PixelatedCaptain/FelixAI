@@ -52,43 +52,29 @@ function formatIssueRef(issueNumber: number): string {
 }
 
 function buildIssueTask(
-  issue: { issueNumber: number; title: string; body?: string; labels?: string[]; latestSummary?: string; error?: string },
-  directive: string,
+  issue: { issueNumber: number; title: string; labels?: string[] },
   phase: IssueExecutionPhase
 ): string {
   const lines = [
-    `GitHub issue #${issue.issueNumber}: ${issue.title}`,
-    "",
-    `Operator directive: ${directive}`,
+    `Work GitHub issue #${issue.issueNumber}: ${issue.title}.`,
+    "Read AGENTS.md first.",
+    "Inspect the live GitHub issue and current repository state before changing code.",
+    "Use the GitHub issue itself as the source of truth for the remaining work and acceptance criteria.",
     `Execution phase: ${phase}`
   ];
 
-  if (issue.body?.trim()) {
-    lines.push("", "Issue body:", issue.body.trim());
-  }
-
   if (issue.labels && issue.labels.length > 0) {
-    lines.push("", `Current GitHub labels: ${issue.labels.join(", ")}`);
-  }
-
-  if (issue.latestSummary?.trim()) {
-    lines.push("", "Prior FelixAI summary:", issue.latestSummary.trim());
-  }
-
-  if (issue.error?.trim()) {
-    lines.push("", "Prior FelixAI error:", issue.error.trim());
+    lines.push(`Current GitHub labels: ${issue.labels.join(", ")}`);
   }
 
   if (phase === "implementation") {
     lines.push(
-      "",
       "Implement the remaining work for this issue in the current repository.",
       "When the implementation is ready for focused validation, add the GitHub label `ready-to-test`.",
       "Do not close the issue during the implementation phase unless the issue is already fully validated."
     );
   } else {
     lines.push(
-      "",
       "Validate this issue end to end.",
       "If focused unit or regression tests are missing, add them before running validation.",
       "Run the most relevant automated tests for the changed behavior.",
@@ -350,12 +336,8 @@ export class IssueRunner {
           {
             issueNumber: issue.issueNumber,
             title: issue.title,
-            body: liveIssue.body,
-            labels: liveIssue.labels,
-            latestSummary: record.latestSummary,
-            error: record.error
+            labels: liveIssue.labels
           },
-          directive,
           phase
         ),
         issueRefs: [formatIssueRef(issue.issueNumber)],
