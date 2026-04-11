@@ -29,13 +29,14 @@ import { IssuePlanner } from "./issue-planner.js";
 import { IssueRunner } from "./issue-runner.js";
 import {
   getIssueRunPath,
-  loadCurrentShellSession,
   loadIssueConversation,
   saveCurrentShellSession,
   saveIssueConversation,
   saveIssuePlan
 } from "./issue-state.js";
+import { runGui } from "./gui.js";
 import { createJobManager } from "./job-manager.js";
+import { filterJobsForCurrentShellSession, formatDuration, formatJobListBlock, inferJobPhase, parseIsoTimestamp, summarizeJob } from "./job-presentation.js";
 import { loadRepoAgentsPreferences, saveRepoAgentsPreferences } from "./repo-agents.js";
 import type { JobState } from "./types.js";
 import { readTaskFromJson } from "./validation.js";
@@ -51,6 +52,7 @@ Usage:
   felixai auth status
   felixai auth logout
   felixai doctor
+  felixai gui [--port <n>] [--no-open]
   felixai init [--force]
   felixai config show
   felixai config set reasoning-effort <minimal|low|medium|high|xhigh> [--repo <path>]
@@ -78,6 +80,7 @@ Examples:
   felixai auth login
   felixai auth status
   felixai doctor
+  felixai gui
   felixai init
   felixai config show
   felixai config set reasoning-effort medium
@@ -160,112 +163,12 @@ function getMultiFlagValues(args: string[], flag: string): string[] {
   return values;
 }
 
-function summarizeJob(job: JobState): {
-  pending: number;
-  running: number;
-  boundary: number;
-  blocked: number;
-  completed: number;
-  failed: number;
-} {
-  return job.workItems.reduce(
-    (summary, item) => {
-      summary[item.status] += 1;
-      return summary;
-    },
-    {
-      pending: 0,
-      running: 0,
-      boundary: 0,
-      blocked: 0,
-      completed: 0,
-      failed: 0
-    }
-  );
-}
-
-function inferJobPhase(job: JobState): string | undefined {
-  const candidates = [job.task, ...job.workItems.map((item) => item.prompt)];
-  for (const candidate of candidates) {
-    const match = candidate.match(/Execution phase:\s*(implementation|validation)/i);
-    if (match?.[1]) {
-      return match[1].toLowerCase();
-    }
-  }
-  return undefined;
-}
-
-function formatJobListBlock(job: JobState, taskSummary: string): string {
-  const summary = summarizeJob(job);
-  const primarySession =
-    job.sessions.find((session) => session.status === "running") ??
-    job.sessions.find((session) => Boolean(session.sessionId));
-  const primarySessionId = primarySession?.sessionId;
-  const phase = inferJobPhase(job);
-  const issueRefs = job.issueRefs.length > 0 ? job.issueRefs.map((issue) => `#${issue}`).join(", ") : "none";
-  const lines = [
-    `Job ID: ${job.jobId}`,
-    `  Status: ${job.status}`,
-    `  Branch: ${job.baseBranch}`,
-    `  Issues: ${issueRefs}`,
-    `  Work Items: done=${summary.completed}/${job.workItems.length} running=${summary.running} failed=${summary.failed}`,
-    `  Task: ${taskSummary}`
-  ];
-
-  if (primarySessionId) {
-    lines.splice(4, 0, `  Session: ${primarySessionId}`);
-  }
-  if (phase) {
-    lines.splice(primarySessionId ? 5 : 4, 0, `  Phase: ${phase}`);
-  }
-  if (primarySession?.changedFilesCount !== undefined) {
-    lines.push(`  Changed Files: ${primarySession.changedFilesCount}`);
-  }
-  if (primarySession?.lastWorkspaceActivityAt) {
-    const lastActivity = parseIsoTimestamp(primarySession.lastWorkspaceActivityAt);
-    if (lastActivity !== undefined) {
-      lines.push(`  Last File Update: ${formatDuration(Date.now() - lastActivity)} ago`);
-    }
-  }
-  if (primarySession?.recentChangedFiles && primarySession.recentChangedFiles.length > 0) {
-    lines.push(`  Recent Files: ${primarySession.recentChangedFiles.join(", ")}`);
-  }
-
-  return lines.join("\n");
-}
-
 function isBranchDriftError(message: string | undefined): boolean {
   return typeof message === "string" && /branch drift detected/i.test(message);
 }
 
-function formatDuration(durationMs: number): string {
-  const totalSeconds = Math.max(1, Math.floor(durationMs / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const parts: string[] = [];
-
-  if (hours > 0) {
-    parts.push(`${hours}h`);
-  }
-  if (minutes > 0 || hours > 0) {
-    parts.push(`${minutes}m`);
-  }
-  parts.push(`${seconds}s`);
-  return parts.join(" ");
-}
-
 function createShellSessionId(): string {
   return `shell-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function parseIsoTimestamp(value: string | undefined): number | undefined {
-  if (!value) {
-    return undefined;
-  }
-
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? undefined : parsed;
 }
 
 function findRepoInstructionsPath(job: JobState): string | undefined {
@@ -1003,7 +906,7 @@ async function handleArgs(args: string[], rl?: ReadlineInterface): Promise<void>
   }
 
   const rest = args.slice(1);
-  if (!["init", "auth", "doctor", "config", "issues", "session", "version", "job", "shell"].includes(command)) {
+  if (!["init", "auth", "doctor", "gui", "config", "issues", "session", "version", "job", "shell"].includes(command)) {
     const repoRoot = await resolveRepoRoot(process.cwd());
     await ensureRepoModelPreference(repoRoot);
     const resolved = await resolveIntentForPrompt(command, rest, repoRoot);
@@ -1095,6 +998,13 @@ async function handleArgs(args: string[], rl?: ReadlineInterface): Promise<void>
           console.log(`[felixai] ${check.id} detail: ${check.detail}`);
         }
       }
+      return;
+    }
+    case "gui": {
+      const repoRoot = await resolveRepoRoot(process.cwd());
+      const port = parseInteger(getFlagValue(rest, "--port"));
+      const openBrowser = !hasFlag(rest, "--no-open");
+      await runGui({ repoRoot, port, openBrowser });
       return;
     }
     case "config": {
@@ -1592,18 +1502,7 @@ async function handleArgs(args: string[], rl?: ReadlineInterface): Promise<void>
             return;
           }
           const repoRoot = await resolveRepoRoot(process.cwd());
-          let visibleJobs = jobs;
-          try {
-            const currentShell = await loadCurrentShellSession<{ shellSessionId?: string }>(process.cwd(), repoRoot);
-            if (currentShell.shellSessionId) {
-              const matching = jobs.filter((job) => job.shellSessionId === currentShell.shellSessionId);
-              if (matching.length > 0) {
-                visibleJobs = matching;
-              }
-            }
-          } catch {
-            // No current shell marker for this repo; fall back to full history.
-          }
+          const { jobs: visibleJobs } = await filterJobsForCurrentShellSession(repoRoot, jobs);
 
           for (const [index, job] of visibleJobs.entries()) {
             if (index > 0) {
