@@ -91,6 +91,14 @@ export async function runCodexCliIssueSession(options: {
         let parsedTerminalResult: ExecutionResult | undefined;
         let settled = false;
         let terminateTimer: NodeJS.Timeout | undefined;
+        const telemetry = {
+          promptChars: options.prompt.length,
+          promptLines: options.prompt.split(/\r?\n/).length,
+          transcriptEventCount: 0,
+          toolCallCount: 0,
+          toolOutputCount: 0,
+          reasoningCount: 0
+        };
 
         const finalize = (result: ExecutionResult): void => {
           if (settled) {
@@ -105,7 +113,17 @@ export async function runCodexCliIssueSession(options: {
           child.stderr.removeAllListeners("data");
           void (async () => {
             await terminateProcessTree(child.pid);
-            resolve(result);
+            resolve({
+              ...result,
+              telemetry: {
+                promptChars: telemetry.promptChars,
+                promptLines: telemetry.promptLines,
+                transcriptEventCount: telemetry.transcriptEventCount,
+                toolCallCount: telemetry.toolCallCount,
+                toolOutputCount: telemetry.toolOutputCount,
+                reasoningCount: telemetry.reasoningCount
+              }
+            });
           })().catch(reject);
         };
 
@@ -140,8 +158,18 @@ export async function runCodexCliIssueSession(options: {
 
             try {
               const event = JSON.parse(trimmed) as CodexJsonEvent;
+              telemetry.transcriptEventCount += 1;
               if (event.type === "thread.started" && event.thread_id) {
                 void options.onSessionReady?.(event.thread_id);
+              }
+              if (event.type === "item.completed" && event.item?.type === "reasoning") {
+                telemetry.reasoningCount += 1;
+              }
+              if (event.type === "item.completed" && event.item?.type === "function_call") {
+                telemetry.toolCallCount += 1;
+              }
+              if (event.type === "item.completed" && event.item?.type === "function_call_output") {
+                telemetry.toolOutputCount += 1;
               }
               if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
                 lastAgentMessage = event.item.text;

@@ -829,7 +829,7 @@ async function testIssueRunnerDoesNotRetryBlockedJobs(): Promise<void> {
     directive: "implement github issue #109"
   });
 
-  assert.equal(startCount, 5);
+  assert.equal(startCount, 3);
   assert.equal(run.status, "paused");
   assert.equal(run.issues[0]?.status, "blocked");
 }
@@ -1216,6 +1216,8 @@ async function testIssueRunnerTransitionsFromImplementationToValidationPhase(): 
   assert.equal(run.status, "completed");
   assert.equal(tasks.length, 2);
   assert.match(tasks[0]!, /Execution phase: implementation/);
+  assert.match(tasks[0]!, /Read the shared repo context first:/);
+  assert.match(tasks[0]!, /Consult AGENTS\.md only if the shared repo context is missing something important\./);
   assert.match(tasks[0]!, /add the GitHub label `ready-to-test`/);
   assert.match(tasks[1]!, /Execution phase: validation/);
   assert.match(tasks[1]!, /add the `done` label, and close or move the issue to done/i);
@@ -3842,6 +3844,12 @@ async function testCliStatusHighlightsStaleRunningWorkItems(): Promise<void> {
         changedFilesCount: 2,
         recentChangedFiles: ["src/A.cs", "tests/A.Tests.cs"],
         lastWorkspaceActivityAt: oldTimestamp,
+        promptChars: 420,
+        promptLines: 12,
+        transcriptEventCount: 38,
+        toolCallCount: 9,
+        toolOutputCount: 9,
+        reasoningCount: 4,
         updatedAt: oldTimestamp
       }
     ],
@@ -3873,6 +3881,10 @@ async function testCliStatusHighlightsStaleRunningWorkItems(): Promise<void> {
   assert.match(output.stdout, /\[felixai\] slow: running .*running_for=/);
   assert.match(output.stdout, /\[felixai\] slow: running .*signal=stale/);
   assert.match(output.stdout, /\[felixai\] slow: running .*changed_files=2/);
+  assert.match(output.stdout, /\[felixai\] slow: running .*prompt_chars=420/);
+  assert.match(output.stdout, /\[felixai\] slow: running .*transcript_events=38/);
+  assert.match(output.stdout, /\[felixai\] slow: running .*tool_calls=9/);
+  assert.match(output.stdout, /\[felixai\] slow: running .*reasoning_events=4/);
   assert.match(output.stdout, /\[felixai\] slow: recent_changed=src\/A\.cs, tests\/A\.Tests\.cs/);
   assert.match(output.stdout, /\[felixai\] slow: progress=changed_files=2 recent=src\/A\.cs, tests\/A\.Tests\.cs/);
   assert.match(output.stdout, /\[felixai\] action required: running work item may be stalled/);

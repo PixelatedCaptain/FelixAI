@@ -1340,6 +1340,24 @@ async function handleArgs(args: string[], rl?: ReadlineInterface): Promise<void>
                 }
               }
             }
+            if (session?.promptChars !== undefined) {
+              details.push(`prompt_chars=${session.promptChars}`);
+            }
+            if (session?.promptLines !== undefined) {
+              details.push(`prompt_lines=${session.promptLines}`);
+            }
+            if (session?.transcriptEventCount !== undefined) {
+              details.push(`transcript_events=${session.transcriptEventCount}`);
+            }
+            if (session?.toolCallCount !== undefined) {
+              details.push(`tool_calls=${session.toolCallCount}`);
+            }
+            if (session?.toolOutputCount !== undefined) {
+              details.push(`tool_outputs=${session.toolOutputCount}`);
+            }
+            if (session?.reasoningCount !== undefined) {
+              details.push(`reasoning_events=${session.reasoningCount}`);
+            }
             const issueInfo = item.issueRefs && item.issueRefs.length > 0 ? ` issues=${item.issueRefs.join(",")}` : "";
             const failureInfo = item.failureCategory ? ` failure=${item.failureCategory} retryable=${item.retryable ? "yes" : "no"}` : "";
             console.log(`[felixai] ${item.id}: ${item.status} ${details.join(" ")}${issueInfo}${failureInfo}`);

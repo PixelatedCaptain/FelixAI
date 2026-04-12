@@ -16,7 +16,7 @@ import { getIssuePlanPath, getIssueRunPath, saveIssuePlan, saveIssueRun } from "
 import { createJobManager } from "./job-manager.js";
 import { type IssueDirectiveScope, parseIssueDirectiveScope } from "./issue-directives.js";
 import type { IssuePlanningItem } from "./issue-planner.js";
-import { loadRepoAgentsPreferences } from "./repo-agents.js";
+import { ensureSharedRepoContext, loadRepoAgentsPreferences, type SharedRepoContext } from "./repo-agents.js";
 import { runCodexCliIssueSession } from "./codex-cli-exec.js";
 import { loadConfig } from "./config.js";
 import { StateStore } from "./state-store.js";
@@ -60,6 +60,8 @@ export interface IssueRunDocument {
   issues: IssueExecutionRecord[];
 }
 
+const ISSUE_MAX_ATTEMPTS = 3;
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -70,15 +72,19 @@ function formatIssueRef(issueNumber: number): string {
 
 function buildIssueTask(
   issue: { issueNumber: number; title: string; labels?: string[] },
-  phase: IssueExecutionPhase
+  phase: IssueExecutionPhase,
+  sharedRepoContext?: SharedRepoContext
 ): string {
   const lines = [
     `Work GitHub issue #${issue.issueNumber}: ${issue.title}.`,
-    "Read AGENTS.md first.",
+    sharedRepoContext
+      ? `Read the shared repo context first: ${sharedRepoContext.contextPath}.`
+      : "Read AGENTS.md first.",
+    sharedRepoContext ? "Consult AGENTS.md only if the shared repo context is missing something important." : undefined,
     "Inspect the live GitHub issue and current repository state before changing code.",
     "Use the GitHub issue itself as the source of truth for the remaining work and acceptance criteria.",
     `Execution phase: ${phase}`
-  ];
+  ].filter((value): value is string => Boolean(value));
 
   if (issue.labels && issue.labels.length > 0) {
     lines.push(`Current GitHub labels: ${issue.labels.join(", ")}`);
@@ -176,6 +182,7 @@ export class IssueRunner {
 
   async run(options: { repoRoot: string; directive: string; scope?: IssueDirectiveScope }): Promise<IssueRunDocument> {
     const repoPreferences = await loadRepoAgentsPreferences(options.repoRoot);
+    const sharedRepoContext = await ensureSharedRepoContext(this.projectRoot, options.repoRoot);
     const config = await loadConfig(this.projectRoot);
     const store = new StateStore(this.projectRoot, { stateDir: config.stateDir, logDir: config.logDir });
     const scope = options.scope ?? parseIssueDirectiveScope("issues", [options.directive]);
@@ -315,6 +322,7 @@ export class IssueRunner {
             issueByNumber,
             options.directive,
             repoPreferences,
+            sharedRepoContext,
             { addIssueLabels, removeIssueLabels, closeIssue },
             store
           )
@@ -360,6 +368,7 @@ export class IssueRunner {
     issueByNumber: Map<number, GitHubIssueRecord>,
     directive: string,
     repoPreferences?: Awaited<ReturnType<typeof loadRepoAgentsPreferences>>,
+    sharedRepoContext?: SharedRepoContext,
     githubActions?: {
       addIssueLabels: typeof addLabelsToGitHubIssue;
       removeIssueLabels: typeof removeLabelsFromGitHubIssue;
@@ -384,7 +393,7 @@ export class IssueRunner {
 
     let liveIssue = issueDetails ?? (await fetchIssue(document.repoRoot, issue.issueNumber));
 
-    while (attempts < 5) {
+    while (attempts < ISSUE_MAX_ATTEMPTS) {
       attempts += 1;
       const phase = determineIssuePhase(liveIssue);
 
@@ -396,7 +405,8 @@ export class IssueRunner {
             title: issue.title,
             labels: liveIssue.labels
           },
-          phase
+          phase,
+          sharedRepoContext
         ),
         issueRefs: [formatIssueRef(issue.issueNumber)],
         autoResume: false,
@@ -472,11 +482,11 @@ export class IssueRunner {
         };
       }
 
-      if (attempts < 5 && jobCanAutoContinue(currentJob)) {
+      if (attempts < ISSUE_MAX_ATTEMPTS && jobCanAutoContinue(currentJob)) {
         continue;
       }
 
-      if (attempts < 5) {
+      if (attempts < ISSUE_MAX_ATTEMPTS) {
         continue;
       }
     }
@@ -485,7 +495,7 @@ export class IssueRunner {
       ...record,
       status: "blocked",
       updatedAt: now(),
-      error: record.error ?? "Issue run hit the maximum retry budget before the GitHub issue reached done state."
+      error: record.error ?? `Issue run hit the maximum retry budget (${ISSUE_MAX_ATTEMPTS}) before the GitHub issue reached done state.`
     };
   }
 

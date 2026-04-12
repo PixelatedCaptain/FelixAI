@@ -270,6 +270,13 @@ function buildInstructionAwarePrompt(
   return lines.join("\n\n");
 }
 
+function summarizePromptTelemetry(prompt: string): { promptChars: number; promptLines: number } {
+  return {
+    promptChars: prompt.length,
+    promptLines: prompt.split(/\r?\n/).length
+  };
+}
+
 function jobToken(jobId: string): string {
   return jobId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "job";
 }
@@ -1250,9 +1257,11 @@ export class JobManager {
         }, this.getExecutionHeartbeatMs());
 
         let result: ExecutionResult;
+        const preparedPrompt = buildInstructionAwarePrompt(item.prompt, repoInstructions, workspace.branchName);
+        const promptTelemetry = summarizePromptTelemetry(preparedPrompt);
         try {
           result = await this.deps.executor({
-            prompt: buildInstructionAwarePrompt(item.prompt, repoInstructions, workspace.branchName),
+            prompt: preparedPrompt,
             workspacePath: workspace.workspacePath,
             branchName: workspace.branchName,
             sessionId,
@@ -1275,6 +1284,8 @@ export class JobManager {
                 branchName: workspace.branchName,
                 attemptCount: updatedItem.attempts,
                 lastPrompt: resumePrompt ?? item.prompt,
+                promptChars: promptTelemetry.promptChars,
+                promptLines: promptTelemetry.promptLines,
                 updatedAt: now()
               });
               currentJob = addEvent(currentJob, "info", "session", `Codex session started: ${readySessionId}`, item.id);
@@ -1324,6 +1335,12 @@ export class JobManager {
             attemptCount: updatedItem.attempts,
             lastPrompt: resumePrompt ?? item.prompt,
             lastResponse: result.summary,
+            promptChars: result.telemetry?.promptChars ?? promptTelemetry.promptChars,
+            promptLines: result.telemetry?.promptLines ?? promptTelemetry.promptLines,
+            transcriptEventCount: result.telemetry?.transcriptEventCount,
+            toolCallCount: result.telemetry?.toolCallCount,
+            toolOutputCount: result.telemetry?.toolOutputCount,
+            reasoningCount: result.telemetry?.reasoningCount,
             updatedAt: now()
           });
           job.status = deriveJobStatus(job);
@@ -1349,6 +1366,12 @@ export class JobManager {
             attemptCount: updatedItem.attempts,
             lastPrompt: resumePrompt,
             lastResponse: result.summary,
+            promptChars: result.telemetry?.promptChars ?? promptTelemetry.promptChars,
+            promptLines: result.telemetry?.promptLines ?? promptTelemetry.promptLines,
+            transcriptEventCount: result.telemetry?.transcriptEventCount,
+            toolCallCount: result.telemetry?.toolCallCount,
+            toolOutputCount: result.telemetry?.toolOutputCount,
+            reasoningCount: result.telemetry?.reasoningCount,
             updatedAt: now()
           });
           await this.deps.store.saveJob(job);
@@ -1373,6 +1396,12 @@ export class JobManager {
             attemptCount: updatedItem.attempts,
             lastPrompt: resumePrompt ?? item.prompt,
             lastResponse: result.summary,
+            promptChars: result.telemetry?.promptChars ?? promptTelemetry.promptChars,
+            promptLines: result.telemetry?.promptLines ?? promptTelemetry.promptLines,
+            transcriptEventCount: result.telemetry?.transcriptEventCount,
+            toolCallCount: result.telemetry?.toolCallCount,
+            toolOutputCount: result.telemetry?.toolOutputCount,
+            reasoningCount: result.telemetry?.reasoningCount,
             updatedAt: now(),
             error: result.summary,
             failureCategory: "execution-blocked",
@@ -1400,6 +1429,12 @@ export class JobManager {
           attemptCount: updatedItem.attempts,
           lastPrompt: resumePrompt ?? item.prompt,
           lastResponse: result.summary,
+          promptChars: result.telemetry?.promptChars ?? promptTelemetry.promptChars,
+          promptLines: result.telemetry?.promptLines ?? promptTelemetry.promptLines,
+          transcriptEventCount: result.telemetry?.transcriptEventCount,
+          toolCallCount: result.telemetry?.toolCallCount,
+          toolOutputCount: result.telemetry?.toolOutputCount,
+          reasoningCount: result.telemetry?.reasoningCount,
           updatedAt: now(),
           failureCategory: "execution-boundary",
           retryable: true,

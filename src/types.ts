@@ -95,6 +95,12 @@ export interface SessionState {
   changedFilesCount?: number;
   recentChangedFiles?: string[];
   lastWorkspaceActivityAt?: string;
+  promptChars?: number;
+  promptLines?: number;
+  transcriptEventCount?: number;
+  toolCallCount?: number;
+  toolOutputCount?: number;
+  reasoningCount?: number;
   updatedAt: string;
   error?: string;
   failureCategory?: FailureCategory;
@@ -224,4 +230,12 @@ export interface ExecutionResult {
   status: "completed" | "needs_resume" | "blocked";
   summary: string;
   nextPrompt?: string;
+  telemetry?: {
+    promptChars?: number;
+    promptLines?: number;
+    transcriptEventCount?: number;
+    toolCallCount?: number;
+    toolOutputCount?: number;
+    reasoningCount?: number;
+  };
 }

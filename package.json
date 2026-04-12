@@ -1,6 +1,6 @@
 {
   "name": "felixai",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "description": "Local Codex SDK orchestrator for batch task execution with checkpoints.",
   "type": "module",
   "bin": {

@@ -319,6 +319,30 @@ export function validateJobState(job: JobState): JobState {
     if (session.lastWorkspaceActivityAt !== undefined) {
       assertString(session.lastWorkspaceActivityAt, `Session '${session.workItemId}' lastWorkspaceActivityAt must be a non-empty string when present.`);
     }
+    if (session.promptChars !== undefined) {
+      assertNonNegativeInteger(session.promptChars, `Session '${session.workItemId}' promptChars must be a non-negative integer when present.`);
+    }
+    if (session.promptLines !== undefined) {
+      assertNonNegativeInteger(session.promptLines, `Session '${session.workItemId}' promptLines must be a non-negative integer when present.`);
+    }
+    if (session.transcriptEventCount !== undefined) {
+      assertNonNegativeInteger(
+        session.transcriptEventCount,
+        `Session '${session.workItemId}' transcriptEventCount must be a non-negative integer when present.`
+      );
+    }
+    if (session.toolCallCount !== undefined) {
+      assertNonNegativeInteger(session.toolCallCount, `Session '${session.workItemId}' toolCallCount must be a non-negative integer when present.`);
+    }
+    if (session.toolOutputCount !== undefined) {
+      assertNonNegativeInteger(
+        session.toolOutputCount,
+        `Session '${session.workItemId}' toolOutputCount must be a non-negative integer when present.`
+      );
+    }
+    if (session.reasoningCount !== undefined) {
+      assertNonNegativeInteger(session.reasoningCount, `Session '${session.workItemId}' reasoningCount must be a non-negative integer when present.`);
+    }
     if (session.failureCategory !== undefined) {
       assertEnum(
         session.failureCategory,
