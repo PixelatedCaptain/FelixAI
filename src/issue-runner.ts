@@ -406,6 +406,7 @@ export class IssueRunner {
 
     let attempts = 0;
     let currentJob: JobState | undefined;
+    let issueSessionId: string | undefined;
 
     let liveIssue = issueDetails ?? (await fetchIssue(document.repoRoot, issue.issueNumber));
 
@@ -428,8 +429,14 @@ export class IssueRunner {
         ),
         issueRefs: [formatIssueRef(issue.issueNumber)],
         autoResume: true,
-        parallelism: 1
+        parallelism: 1,
+        initialSessionId: issueSessionId
       });
+
+      issueSessionId =
+        currentJob.sessions.find((session) => Boolean(session.sessionId))?.sessionId ??
+        currentJob.workItems.find((item) => Boolean(item.sessionId))?.sessionId ??
+        issueSessionId;
 
       record = {
         ...record,

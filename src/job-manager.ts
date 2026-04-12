@@ -713,14 +713,21 @@ export class JobManager {
       status: "ready",
       planningSummary: plan.summary,
       updatedAt: now(),
-      workItems: plan.workItems.map((item) =>
-        workItemFromPlan({
+      workItems: plan.workItems.map((item, index) => {
+        const workItem = workItemFromPlan({
           ...item,
           issueRefs: item.issueRefs && item.issueRefs.length > 0 ? item.issueRefs : request.issueRefs ?? []
-        })
-      )
+        });
+        if (index === 0 && request.initialSessionId) {
+          workItem.sessionId = request.initialSessionId;
+        }
+        return workItem;
+      })
     };
     job = addEvent(job, "info", "planner", `Planner produced ${plan.workItems.length} work items.`);
+    if (request.initialSessionId) {
+      job = addEvent(job, "info", "session", `Seeded job with existing Codex session ${request.initialSessionId}.`);
+    }
     await this.deps.store.saveJob(job);
 
     return this.runJob(job.jobId);

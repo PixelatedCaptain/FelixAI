@@ -52,6 +52,7 @@ export interface JobStartRequest {
   requireClean?: boolean;
   issueRefs?: string[];
   shellSessionId?: string;
+  initialSessionId?: string;
 }
 
 export interface PlannedWorkItem {

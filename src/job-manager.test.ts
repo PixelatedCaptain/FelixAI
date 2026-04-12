@@ -1082,10 +1082,12 @@ async function testIssueRunnerTransitionsFromImplementationToValidationPhase(): 
   await ensureFelixDirectories(root);
 
   const tasks: string[] = [];
+  const initialSessionIds: Array<string | undefined> = [];
   const managerFactory = (async () =>
     ({
-      startJob: async ({ task, issueRefs }: { task: string; issueRefs?: string[] }) => {
+      startJob: async ({ task, issueRefs, initialSessionId }: { task: string; issueRefs?: string[]; initialSessionId?: string }) => {
         tasks.push(task);
+        initialSessionIds.push(initialSessionId);
         return {
           schemaVersion: 1,
           jobId: `job-${tasks.length}`,
@@ -1109,10 +1111,20 @@ async function testIssueRunnerTransitionsFromImplementationToValidationPhase(): 
               status: "completed",
               attempts: 1,
               branchName: sourceBranch,
+              sessionId: tasks.length === 1 ? "session-109" : initialSessionId,
               lastResponse: "done"
             }
           ],
-          sessions: [],
+          sessions: [
+            {
+              workItemId: "issue-attempt",
+              sessionId: tasks.length === 1 ? "session-109" : initialSessionId,
+              status: "completed",
+              attemptCount: 1,
+              branchName: sourceBranch,
+              updatedAt: nowIso()
+            }
+          ],
           events: [],
           mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
           mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
@@ -1215,6 +1227,8 @@ async function testIssueRunnerTransitionsFromImplementationToValidationPhase(): 
 
   assert.equal(run.status, "completed");
   assert.equal(tasks.length, 2);
+  assert.equal(initialSessionIds[0], undefined);
+  assert.equal(initialSessionIds[1], "session-109");
   assert.match(tasks[0]!, /Execution phase: implementation/);
   assert.match(tasks[0]!, /Read the shared repo context first:/);
   assert.match(tasks[0]!, /Consult AGENTS\.md only if the shared repo context is missing something important\./);
@@ -1372,6 +1386,137 @@ async function testIssueRunnerReusesSameSessionForValidationWhenJobAutoResumed()
   assert.deepEqual(addLabelCalls, [{ issueNumber: 310, labels: ["done"] }]);
   assert.equal(closeCalls.length, 1);
   assert.equal((await readFile(path.join(root, "src.txt"), "utf8")).trim(), "validated in same session");
+}
+
+async function testIssueRunnerReusesSameSessionWhenImplementationNeedsAnotherTurn(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-issue-reuse-impl-"));
+  await runCommand("git", ["init", "-b", "main"], { cwd: root });
+  await writeFile(path.join(root, "AGENTS.md"), "model: gpt-5.4\n", "utf8");
+  await ensureFelixDirectories(root);
+
+  const initialSessionIds: Array<string | undefined> = [];
+  let startCount = 0;
+  const managerFactory = (async () =>
+    ({
+      startJob: async ({ task, issueRefs, initialSessionId }: { task: string; issueRefs?: string[]; initialSessionId?: string }) => {
+        startCount += 1;
+        initialSessionIds.push(initialSessionId);
+        return {
+          schemaVersion: 1,
+          jobId: `job-${startCount}`,
+          status: "completed",
+          repoPath: root,
+          repoRoot: root,
+          task,
+          issueRefs: issueRefs ?? [],
+          baseBranch: "main",
+          parallelism: 1,
+          autoResume: true,
+          maxResumesPerItem: 2,
+          planningSummary: "summary",
+          workItems: [
+            {
+              id: "issue-attempt",
+              title: "impl work",
+              prompt: task,
+              issueRefs: issueRefs ?? [],
+              dependsOn: [],
+              status: "completed",
+              attempts: 1,
+              sessionId: startCount === 1 ? "session-410" : initialSessionId,
+              lastResponse: "implementation continued"
+            }
+          ],
+          sessions: [
+            {
+              workItemId: "issue-attempt",
+              sessionId: startCount === 1 ? "session-410" : initialSessionId,
+              status: "completed",
+              attemptCount: 1,
+              updatedAt: nowIso()
+            }
+          ],
+          events: [],
+          mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+          mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+          remoteBranches: [],
+          pullRequests: [],
+          issueSummaries: [],
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        } satisfies JobState;
+      }
+    })) as unknown as typeof createJobManager;
+
+  let fetchCount = 0;
+  const runner = new IssueRunner(root, managerFactory, {
+    snapshotter: async () => ({
+      snapshot: {
+        repoRoot: root,
+        generatedAt: nowIso(),
+        issues: [
+          {
+            id: "I_410",
+            number: 410,
+            title: "Continue implementation",
+            body: "## Summary\nBody\n\n## Execution Metadata\n- Lane: ordered\n- Depends on: none\n- Parallel-safe: no\n\n## Done Criteria\n- done",
+            bodySummary: "Body",
+            labels: ["app-ready"],
+            assignees: [],
+            state: "OPEN",
+            updatedAt: nowIso(),
+            url: "https://example.test/issues/410",
+            executionMetadata: {
+              lane: "ordered",
+              dependsOn: [],
+              parallelSafe: false,
+              doneChecklistCount: 1,
+              doneChecklistCompletedCount: 0,
+              validationErrors: []
+            }
+          }
+        ]
+      },
+      outputPath: path.join(root, ".felixai", "state", "issues", "snapshot.json")
+    }),
+    fetchIssue: async () => {
+      fetchCount += 1;
+      return {
+        id: "I_410",
+        number: 410,
+        title: "Continue implementation",
+        body: "## Done Criteria\n- done",
+        bodySummary: "Body",
+        labels: fetchCount === 1 ? ["app-ready"] : ["done"],
+        assignees: [],
+        state: fetchCount === 1 ? "OPEN" : "CLOSED",
+        updatedAt: nowIso(),
+        url: "https://example.test/issues/410",
+        executionMetadata: {
+          lane: "ordered",
+          dependsOn: [],
+          parallelSafe: false,
+          doneChecklistCount: 1,
+          doneChecklistCompletedCount: fetchCount === 1 ? 0 : 1,
+          validationErrors: []
+        }
+      };
+    },
+    ensureLabel: async () => {},
+    addIssueLabels: async () => {},
+    removeIssueLabels: async () => {},
+    closeIssue: async () => {}
+  });
+
+  const run = await runner.run({
+    repoRoot: root,
+    directive: "implement github issue #410"
+  });
+
+  assert.equal(run.status, "completed");
+  assert.equal(startCount, 2);
+  assert.equal(initialSessionIds[0], undefined);
+  assert.equal(initialSessionIds[1], "session-410");
 }
 
 async function testIssueRunnerValidationFinalizesBranchAndArchivesSupersededJobs(): Promise<void> {
@@ -4594,6 +4739,8 @@ async function main(): Promise<void> {
   await testIssueRunnerTransitionsFromImplementationToValidationPhase();
   await testIssueRunnerValidationFinalizesBranchAndArchivesSupersededJobs();
   await testIssueRunnerArchivesOlderCompletedJobsButKeepsCurrentJob();
+  await testIssueRunnerReusesSameSessionForValidationWhenJobAutoResumed();
+  await testIssueRunnerReusesSameSessionWhenImplementationNeedsAnotherTurn();
   await testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt();
   await testLooksLikePlanThenExecuteDirectiveDetectsMixedIntent();
   await testLooksLikeIssueLabelingDirectiveDetectsLabelWork();
