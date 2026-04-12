@@ -13,7 +13,7 @@ import {
   ensureGitHubLabel,
   removeLabelsFromGitHubIssue
 } from "./github.js";
-import { getIssuePlanPath, getIssueRunPath, saveIssuePlan, saveIssueRun } from "./issue-state.js";
+import { getIssuePlanPath, getIssueRunPath, loadIssueRun, saveIssuePlan, saveIssueRun } from "./issue-state.js";
 import { createJobManager } from "./job-manager.js";
 import { type IssueDirectiveScope, parseIssueDirectiveScope } from "./issue-directives.js";
 import type { IssuePlanningItem } from "./issue-planner.js";
@@ -60,6 +60,14 @@ export interface IssueRunDocument {
   summary: string;
   status: IssueRunOverallStatus;
   issues: IssueExecutionRecord[];
+}
+
+interface RecoverableIssueExecutionState {
+  previousJobId?: string;
+  sessionId?: string;
+  branchName?: string;
+  workspacePath?: string;
+  phase?: IssueExecutionPhase;
 }
 
 const ISSUE_MAX_ATTEMPTS = 3;
@@ -157,6 +165,10 @@ function hasBlockingRepoChanges(changedFiles: string[]): boolean {
     const normalized = entry.replace(/\\/g, "/");
     return normalized !== "AGENTS.md" && !normalized.startsWith(".felixai/");
   });
+}
+
+function isRecoverableJobStatus(status: JobState["status"]): boolean {
+  return status === "running" || status === "paused" || status === "failed";
 }
 
 export function selectIssueWave(issues: IssueExecutionRecord[]): IssueExecutionRecord[] {
@@ -268,6 +280,7 @@ export class IssueRunner {
       summary: plan.summary
     };
     const planPath = await saveIssuePlan(this.projectRoot, options.repoRoot, planDocument);
+    const previousRun = await loadIssueRun<IssueRunDocument>(this.projectRoot, options.repoRoot).catch(() => undefined);
 
     let document: IssueRunDocument = {
       repoRoot: options.repoRoot,
@@ -281,7 +294,9 @@ export class IssueRunner {
       status: "running",
       issues: plan.orderedIssues.map((issue) => ({
         ...issue,
-        phase: "implementation",
+        phase:
+          previousRun?.issues.find((previous) => previous.issueNumber === issue.issueNumber)?.phase ??
+          "implementation",
         status: "pending",
         jobIds: [],
         updatedAt: now()
@@ -406,7 +421,10 @@ export class IssueRunner {
 
     let attempts = 0;
     let currentJob: JobState | undefined;
-    let issueSessionId: string | undefined;
+    const recoverable = store ? await this.findRecoverableIssueState(store, document.repoRoot, issue.issueNumber) : undefined;
+    let issueSessionId: string | undefined = recoverable?.sessionId;
+    let issueBranchName: string | undefined = recoverable?.branchName;
+    let issueWorkspacePath: string | undefined = recoverable?.workspacePath;
 
     let liveIssue = issueDetails ?? (await fetchIssue(document.repoRoot, issue.issueNumber));
 
@@ -430,13 +448,23 @@ export class IssueRunner {
         issueRefs: [formatIssueRef(issue.issueNumber)],
         autoResume: true,
         parallelism: 1,
-        initialSessionId: issueSessionId
+        initialSessionId: issueSessionId,
+        initialBranchName: issueBranchName,
+        initialWorkspacePath: issueWorkspacePath
       });
 
       issueSessionId =
         currentJob.sessions.find((session) => Boolean(session.sessionId))?.sessionId ??
         currentJob.workItems.find((item) => Boolean(item.sessionId))?.sessionId ??
         issueSessionId;
+      issueBranchName =
+        currentJob.workItems.find((item) => Boolean(item.branchName))?.branchName ??
+        currentJob.sessions.find((session) => Boolean(session.branchName))?.branchName ??
+        issueBranchName;
+      issueWorkspacePath =
+        currentJob.workItems.find((item) => Boolean(item.workspacePath))?.workspacePath ??
+        currentJob.sessions.find((session) => Boolean(session.workspacePath))?.workspacePath ??
+        issueWorkspacePath;
 
       record = {
         ...record,
@@ -543,6 +571,44 @@ export class IssueRunner {
       status: "blocked",
       updatedAt: now(),
       error: record.error ?? `Issue run hit the maximum retry budget (${ISSUE_MAX_ATTEMPTS}) before the GitHub issue reached done state.`
+    };
+  }
+
+  private async findRecoverableIssueState(
+    store: StateStore,
+    repoRoot: string,
+    issueNumber: number
+  ): Promise<RecoverableIssueExecutionState | undefined> {
+    const issueRef = formatIssueRef(issueNumber);
+    const jobs = await store.listJobs();
+    const candidate = jobs
+      .filter((job) => path.resolve(job.repoRoot) === path.resolve(repoRoot))
+      .filter((job) => job.issueRefs.includes(issueRef))
+      .filter((job) => isRecoverableJobStatus(job.status))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+
+    if (!candidate) {
+      return undefined;
+    }
+
+    const item = [...candidate.workItems]
+      .filter((workItem) => (workItem.issueRefs ?? []).includes(issueRef) || candidate.issueRefs.includes(issueRef))
+      .sort((left, right) => {
+        const rightTime = right.completedAt ?? right.startedAt ?? "";
+        const leftTime = left.completedAt ?? left.startedAt ?? "";
+        return rightTime.localeCompare(leftTime);
+      })[0];
+    const session = candidate.sessions.find((entry) => entry.workItemId === item?.id);
+
+    if (!item?.branchName && !item?.workspacePath && !session?.sessionId) {
+      return undefined;
+    }
+
+    return {
+      previousJobId: candidate.jobId,
+      sessionId: session?.sessionId ?? item?.sessionId,
+      branchName: item?.branchName ?? session?.branchName,
+      workspacePath: item?.workspacePath ?? session?.workspacePath
     };
   }
 

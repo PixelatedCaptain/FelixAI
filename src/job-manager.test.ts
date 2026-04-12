@@ -1520,6 +1520,206 @@ async function testIssueRunnerReusesSameSessionWhenImplementationNeedsAnotherTur
   assert.equal(initialSessionIds[1], "session-410");
 }
 
+async function testIssueRunnerRecoversPreviousIssueWorkspaceAcrossFreshInvocation(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-issue-recover-invocation-"));
+  await runCommand("git", ["init", "-b", "main"], { cwd: root });
+  await writeFile(path.join(root, "AGENTS.md"), "model: gpt-5.4\n", "utf8");
+  await ensureFelixDirectories(root);
+
+  const previousWorkspacePath = path.join(root, ".felixai", "workspaces", "old-job", "issue-attempt");
+  const previousBranchName = "agent/issue-510/job-old-job-issue-attempt";
+  const previousSessionId = "session-510";
+
+  const store = new StateStore(root, { stateDir: DEFAULT_CONFIG.stateDir, logDir: DEFAULT_CONFIG.logDir });
+  await store.saveJob({
+    schemaVersion: 1,
+    jobId: "old-job",
+    status: "failed",
+    repoPath: root,
+    repoRoot: root,
+    task: "old task",
+    issueRefs: ["510"],
+    baseBranch: "main",
+    parallelism: 1,
+    autoResume: true,
+    maxResumesPerItem: 2,
+    planningSummary: "old summary",
+    workItems: [
+      {
+        id: "issue-attempt",
+        title: "Old attempt",
+        prompt: "Old attempt",
+        issueRefs: ["510"],
+        dependsOn: [],
+        status: "failed",
+        attempts: 1,
+        branchName: previousBranchName,
+        workspacePath: previousWorkspacePath,
+        sessionId: previousSessionId,
+        lastResponse: "old boundary"
+      }
+    ],
+    sessions: [
+      {
+        workItemId: "issue-attempt",
+        sessionId: previousSessionId,
+        status: "failed",
+        workspacePath: previousWorkspacePath,
+        branchName: previousBranchName,
+        attemptCount: 1,
+        updatedAt: nowIso()
+      }
+    ],
+    events: [],
+    mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+    mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+    remoteBranches: [],
+    pullRequests: [],
+    issueSummaries: [],
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  });
+
+  const initialSessionIds: Array<string | undefined> = [];
+  const initialBranchNames: Array<string | undefined> = [];
+  const initialWorkspacePaths: Array<string | undefined> = [];
+
+  const managerFactory = (async () =>
+    ({
+      startJob: async ({
+        task,
+        issueRefs,
+        initialSessionId,
+        initialBranchName,
+        initialWorkspacePath
+      }: {
+        task: string;
+        issueRefs?: string[];
+        initialSessionId?: string;
+        initialBranchName?: string;
+        initialWorkspacePath?: string;
+      }) => {
+        initialSessionIds.push(initialSessionId);
+        initialBranchNames.push(initialBranchName);
+        initialWorkspacePaths.push(initialWorkspacePath);
+        return {
+          schemaVersion: 1,
+          jobId: "job-recovered",
+          status: "completed",
+          repoPath: root,
+          repoRoot: root,
+          task,
+          issueRefs: issueRefs ?? [],
+          baseBranch: "main",
+          parallelism: 1,
+          autoResume: true,
+          maxResumesPerItem: 2,
+          planningSummary: "summary",
+          workItems: [
+            {
+              id: "issue-attempt",
+              title: "Recovered attempt",
+              prompt: task,
+              issueRefs: issueRefs ?? [],
+              dependsOn: [],
+              status: "completed",
+              attempts: 1,
+              branchName: initialBranchName,
+              workspacePath: initialWorkspacePath,
+              sessionId: initialSessionId,
+              lastResponse: "recovered execution"
+            }
+          ],
+          sessions: [
+            {
+              workItemId: "issue-attempt",
+              sessionId: initialSessionId,
+              status: "completed",
+              branchName: initialBranchName,
+              workspacePath: initialWorkspacePath,
+              attemptCount: 1,
+              updatedAt: nowIso()
+            }
+          ],
+          events: [],
+          mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+          mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+          remoteBranches: [],
+          pullRequests: [],
+          issueSummaries: [],
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        } satisfies JobState;
+      }
+    })) as unknown as typeof createJobManager;
+
+  const runner = new IssueRunner(root, managerFactory, {
+    snapshotter: async () => ({
+      snapshot: {
+        repoRoot: root,
+        generatedAt: nowIso(),
+        issues: [
+          {
+            id: "I_510",
+            number: 510,
+            title: "Recover issue workspace",
+            body: "## Summary\nBody\n\n## Execution Metadata\n- Lane: ordered\n- Depends on: none\n- Parallel-safe: no\n\n## Done Criteria\n- done",
+            bodySummary: "Body",
+            labels: ["app-ready"],
+            assignees: [],
+            state: "OPEN",
+            updatedAt: nowIso(),
+            url: "https://example.test/issues/510",
+            executionMetadata: {
+              lane: "ordered",
+              dependsOn: [],
+              parallelSafe: false,
+              doneChecklistCount: 1,
+              doneChecklistCompletedCount: 0,
+              validationErrors: []
+            }
+          }
+        ]
+      },
+      outputPath: path.join(root, ".felixai", "state", "issues", "snapshot.json")
+    }),
+    fetchIssue: async () => ({
+      id: "I_510",
+      number: 510,
+      title: "Recover issue workspace",
+      body: "## Done Criteria\n- done",
+      bodySummary: "Body",
+      labels: ["done"],
+      assignees: [],
+      state: "CLOSED",
+      updatedAt: nowIso(),
+      url: "https://example.test/issues/510",
+      executionMetadata: {
+        lane: "ordered",
+        dependsOn: [],
+        parallelSafe: false,
+        doneChecklistCount: 1,
+        doneChecklistCompletedCount: 1,
+        validationErrors: []
+      }
+    }),
+    ensureLabel: async () => {},
+    addIssueLabels: async () => {},
+    removeIssueLabels: async () => {},
+    closeIssue: async () => {}
+  });
+
+  const run = await runner.run({
+    repoRoot: root,
+    directive: "implement github issue #510"
+  });
+
+  assert.equal(run.status, "completed");
+  assert.equal(initialSessionIds[0], previousSessionId);
+  assert.equal(initialBranchNames[0], previousBranchName);
+  assert.equal(initialWorkspacePaths[0], previousWorkspacePath);
+}
+
 async function testIssueRunnerValidationFinalizesBranchAndArchivesSupersededJobs(): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "felix-issue-finalize-"));
   await runCommand("git", ["init", "-b", "main"], { cwd: root });
@@ -4753,6 +4953,7 @@ async function main(): Promise<void> {
   await testIssueRunnerArchivesOlderCompletedJobsButKeepsCurrentJob();
   await testIssueRunnerReusesSameSessionForValidationWhenJobAutoResumed();
   await testIssueRunnerReusesSameSessionWhenImplementationNeedsAnotherTurn();
+  await testIssueRunnerRecoversPreviousIssueWorkspaceAcrossFreshInvocation();
   await testLooksLikeIssueDrivenDirectiveDetectsGitHubIssuePrompt();
   await testLooksLikePlanThenExecuteDirectiveDetectsMixedIntent();
   await testLooksLikeIssueLabelingDirectiveDetectsLabelWork();

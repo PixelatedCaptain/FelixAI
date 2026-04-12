@@ -35,11 +35,15 @@ export class WorkspaceManager {
     workItemId: string,
     baseBranch: string,
     repoRoot: string,
-    issueRefs: string[] = []
+    issueRefs: string[] = [],
+    preferred?: {
+      branchName?: string;
+      workspacePath?: string;
+    }
   ): Promise<WorkspaceAssignment> {
     const issueToken = issueRefs[0] ? `issue-${slugify(issueRefs[0])}` : slugify(workItemId);
-    const branchName = `agent/${issueToken}/job-${jobToken(jobId)}-${slugify(workItemId)}`;
-    const workspacePath = path.join(this.workspaceRoot, jobId, slugify(workItemId));
+    const branchName = preferred?.branchName ?? `agent/${issueToken}/job-${jobToken(jobId)}-${slugify(workItemId)}`;
+    const workspacePath = preferred?.workspacePath ?? path.join(this.workspaceRoot, jobId, slugify(workItemId));
     await ensureDirectory(path.dirname(workspacePath));
     await this.ops.pruneWorktrees(repoRoot);
     const worktrees = await this.ops.listWorktrees(repoRoot);

@@ -721,12 +721,26 @@ export class JobManager {
         if (index === 0 && request.initialSessionId) {
           workItem.sessionId = request.initialSessionId;
         }
+        if (index === 0 && request.initialBranchName) {
+          workItem.branchName = request.initialBranchName;
+        }
+        if (index === 0 && request.initialWorkspacePath) {
+          workItem.workspacePath = request.initialWorkspacePath;
+        }
         return workItem;
       })
     };
     job = addEvent(job, "info", "planner", `Planner produced ${plan.workItems.length} work items.`);
     if (request.initialSessionId) {
       job = addEvent(job, "info", "session", `Seeded job with existing Codex session ${request.initialSessionId}.`);
+    }
+    if (request.initialBranchName || request.initialWorkspacePath) {
+      job = addEvent(
+        job,
+        "info",
+        "workspace",
+        `Seeded job with existing issue workspace ${request.initialWorkspacePath ?? "unknown"} on ${request.initialBranchName ?? "unknown"}.`
+      );
     }
     await this.deps.store.saveJob(job);
 
@@ -1174,7 +1188,11 @@ export class JobManager {
         item.id,
         job.baseBranch,
         job.repoRoot,
-        item.issueRefs ?? []
+        item.issueRefs ?? [],
+        {
+          branchName: item.branchName,
+          workspacePath: item.workspacePath
+        }
       );
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);

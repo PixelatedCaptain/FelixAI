@@ -53,6 +53,8 @@ export interface JobStartRequest {
   issueRefs?: string[];
   shellSessionId?: string;
   initialSessionId?: string;
+  initialBranchName?: string;
+  initialWorkspacePath?: string;
 }
 
 export interface PlannedWorkItem {
