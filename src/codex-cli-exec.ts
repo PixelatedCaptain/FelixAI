@@ -44,9 +44,21 @@ function parseExecutionResult(raw: string): ExecutionResult {
   };
 }
 
+function buildResumedPrompt(prompt: string): string {
+  return [
+    "Continue the existing FelixAI session.",
+    "Return only a JSON object with keys: status, summary, nextPrompt.",
+    "Allowed status values: completed, needs_resume, blocked.",
+    "Use nextPrompt=null unless another same-session continuation is required.",
+    "",
+    prompt
+  ].join("\n");
+}
+
 export async function runCodexCliIssueSession(options: {
   prompt: string;
   workspacePath: string;
+  sessionId?: string;
   model?: string;
   modelReasoningEffort?: ModelReasoningEffort;
   sandboxMode?: SandboxMode;
@@ -57,20 +69,22 @@ export async function runCodexCliIssueSession(options: {
   const schemaPath = path.join(schemaDir, "execution-schema.json");
   await writeFile(schemaPath, `${JSON.stringify(EXECUTION_SCHEMA, null, 2)}\n`, "utf8");
 
-  const args = ["exec", "--json", "--output-schema", schemaPath, "-C", options.workspacePath];
+  const args = options.sessionId
+    ? ["exec", "resume", options.sessionId]
+    : ["exec", "--output-schema", schemaPath, "-C", options.workspacePath];
   if (options.model) {
     args.push("-m", options.model);
   }
   if (options.modelReasoningEffort) {
     args.push("-c", `model_reasoning_effort="${options.modelReasoningEffort}"`);
   }
-  if (options.sandboxMode) {
+  if (!options.sessionId && options.sandboxMode) {
     args.push("-s", options.sandboxMode);
   }
   if (options.networkAccessEnabled) {
     args.push("--search");
   }
-  args.push("-");
+  args.push("--json", "-");
 
   try {
     return await new Promise<ExecutionResult>((resolve, reject) => {
@@ -143,7 +157,7 @@ export async function runCodexCliIssueSession(options: {
         child.stderr.setEncoding("utf8");
 
         child.stdin.setDefaultEncoding("utf8");
-        child.stdin.end(options.prompt);
+        child.stdin.end(options.sessionId ? buildResumedPrompt(options.prompt) : options.prompt);
 
         child.stdout.on("data", (chunk: string) => {
           stdoutBuffer += chunk;

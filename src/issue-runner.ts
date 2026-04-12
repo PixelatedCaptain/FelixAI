@@ -1,4 +1,5 @@
 import path from "node:path";
+import { writeFile } from "node:fs/promises";
 
 import {
   fetchGitHubIssue,
@@ -20,6 +21,7 @@ import { ensureSharedRepoContext, loadRepoAgentsPreferences, type SharedRepoCont
 import { runCodexCliIssueSession } from "./codex-cli-exec.js";
 import { loadConfig } from "./config.js";
 import { StateStore } from "./state-store.js";
+import { ensureDirectory } from "./fs-utils.js";
 import {
   checkoutBranch,
   getCurrentBranch,
@@ -73,7 +75,8 @@ function formatIssueRef(issueNumber: number): string {
 function buildIssueTask(
   issue: { issueNumber: number; title: string; labels?: string[] },
   phase: IssueExecutionPhase,
-  sharedRepoContext?: SharedRepoContext
+  sharedRepoContext?: SharedRepoContext,
+  validationHandoffPath?: string
 ): string {
   const lines = [
     `Work GitHub issue #${issue.issueNumber}: ${issue.title}.`,
@@ -89,11 +92,16 @@ function buildIssueTask(
   if (issue.labels && issue.labels.length > 0) {
     lines.push(`Current GitHub labels: ${issue.labels.join(", ")}`);
   }
+  if (phase === "validation" && validationHandoffPath) {
+    lines.push(`Read the validation handoff first: ${validationHandoffPath}.`);
+  }
 
   if (phase === "implementation") {
     lines.push(
       "Implement the remaining work for this issue in the current repository.",
       "When the implementation is ready for focused validation, add the GitHub label `ready-to-test`.",
+      "If validation can continue safely in this same session, return status=needs_resume instead of completed.",
+      "Set nextPrompt to a compact validation handoff that includes changed files, tests already added or run, and the next validation steps.",
       "Do not close the issue during the implementation phase unless the issue is already fully validated."
     );
   } else {
@@ -134,6 +142,14 @@ function shouldAdvanceToValidationPhase(
   issue: Pick<GitHubIssueRecord, "labels" | "state">
 ): boolean {
   return completedPhase === "implementation" && issue.state.toUpperCase() === "OPEN" && determineIssuePhase(issue) === "validation";
+}
+
+function didJobReuseSessionForValidation(job: JobState): boolean {
+  return job.workItems.some((item) => item.attempts > 1) || job.sessions.some((session) => session.attemptCount > 1);
+}
+
+function getValidationHandoffPath(projectRoot: string, repoRoot: string, issueNumber: number): string {
+  return path.join(projectRoot, ".felixai", "state", "issues", `${path.basename(repoRoot)}-issue-${issueNumber}-validation-handoff.md`);
 }
 
 function hasBlockingRepoChanges(changedFiles: string[]): boolean {
@@ -396,6 +412,7 @@ export class IssueRunner {
     while (attempts < ISSUE_MAX_ATTEMPTS) {
       attempts += 1;
       const phase = determineIssuePhase(liveIssue);
+      const validationHandoffPath = phase === "validation" ? getValidationHandoffPath(this.projectRoot, document.repoRoot, issue.issueNumber) : undefined;
 
       currentJob = await manager.startJob({
         repoPath: document.repoRoot,
@@ -406,10 +423,11 @@ export class IssueRunner {
             labels: liveIssue.labels
           },
           phase,
-          sharedRepoContext
+          sharedRepoContext,
+          validationHandoffPath
         ),
         issueRefs: [formatIssueRef(issue.issueNumber)],
-        autoResume: false,
+        autoResume: true,
         parallelism: 1
       });
 
@@ -426,7 +444,29 @@ export class IssueRunner {
       await this.saveIssueRecord(document, record);
 
       if (currentJob.status === "completed" && githubActions) {
-        if (phase === "implementation") {
+        if (phase === "implementation" && didJobReuseSessionForValidation(currentJob)) {
+          const finalizedBranch = currentJob.workItems.find((item) => item.id === "issue-attempt")?.branchName;
+          if (!finalizedBranch) {
+            throw new Error("Validation completed in the reused session, but Felix could not determine the source branch for finalization.");
+          }
+          await this.finalizeIssueBranch(document.repoRoot, currentJob.baseBranch, finalizedBranch);
+          await githubActions.removeIssueLabels({
+            repoPath: document.repoRoot,
+            issueNumber: issue.issueNumber,
+            labels: ["ready-to-test"]
+          });
+          await githubActions.addIssueLabels({
+            repoPath: document.repoRoot,
+            issueNumber: issue.issueNumber,
+            labels: ["done"]
+          });
+          await githubActions.closeIssue({
+            repoPath: document.repoRoot,
+            issueNumber: issue.issueNumber,
+            comment: "Felix validation passed and the issue is complete."
+          });
+        } else if (phase === "implementation") {
+          await this.writeValidationHandoff(document.repoRoot, issue.issueNumber, issue.title, currentJob);
           await githubActions.addIssueLabels({
             repoPath: document.repoRoot,
             issueNumber: issue.issueNumber,
@@ -559,5 +599,34 @@ export class IssueRunner {
       }
       await store.archiveJob(job.jobId);
     }
+  }
+
+  private async writeValidationHandoff(repoRoot: string, issueNumber: number, issueTitle: string, job: JobState): Promise<string> {
+    const handoffPath = getValidationHandoffPath(this.projectRoot, repoRoot, issueNumber);
+    await ensureDirectory(path.dirname(handoffPath));
+    const session =
+      job.sessions.find((entry) => entry.status === "completed") ??
+      job.sessions.find((entry) => Boolean(entry.sessionId));
+    const workItem = job.workItems.find((entry) => entry.id === "issue-attempt") ?? job.workItems[0];
+    const lines = [
+      "# Felix Validation Handoff",
+      "",
+      `Issue: #${issueNumber} ${issueTitle}`,
+      `Job ID: ${job.jobId}`,
+      `Branch: ${workItem?.branchName ?? "unknown"}`,
+      "",
+      "## Implementation Summary",
+      workItem?.lastResponse ?? job.planningSummary ?? "No implementation summary was recorded.",
+      "",
+      "## Changed Files",
+      ...(session?.recentChangedFiles && session.recentChangedFiles.length > 0 ? session.recentChangedFiles.map((file) => `- ${file}`) : ["- No recent changed file summary was recorded."]),
+      "",
+      "## Validation Focus",
+      "- Re-check the changed files first before broad repo searches.",
+      "- Reuse existing focused tests where possible.",
+      "- Add only the missing focused validation needed to prove the issue is complete."
+    ];
+    await writeFile(handoffPath, `${lines.join("\n").trimEnd()}\n`, "utf8");
+    return handoffPath;
   }
 }

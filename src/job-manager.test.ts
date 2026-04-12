@@ -1220,7 +1220,158 @@ async function testIssueRunnerTransitionsFromImplementationToValidationPhase(): 
   assert.match(tasks[0]!, /Consult AGENTS\.md only if the shared repo context is missing something important\./);
   assert.match(tasks[0]!, /add the GitHub label `ready-to-test`/);
   assert.match(tasks[1]!, /Execution phase: validation/);
+  assert.match(tasks[1]!, /Read the validation handoff first:/);
   assert.match(tasks[1]!, /add the `done` label, and close or move the issue to done/i);
+  assert.equal(
+    await pathExists(path.join(root, ".felixai", "state", "issues", `${path.basename(root)}-issue-109-validation-handoff.md`)),
+    true
+  );
+}
+
+async function testIssueRunnerReusesSameSessionForValidationWhenJobAutoResumed(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "felix-issue-reuse-validation-"));
+  await runCommand("git", ["init", "-b", "main"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "felix@example.test"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Felix Tests"], { cwd: root });
+  await writeFile(path.join(root, "AGENTS.md"), "model: gpt-5.4\n", "utf8");
+  await writeFile(path.join(root, "src.txt"), "base\n", "utf8");
+  await runCommand("git", ["add", "AGENTS.md", "src.txt"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "initial"], { cwd: root });
+
+  const sourceBranch = "agent/issue-310/job-current-issue-attempt";
+  await runCommand("git", ["checkout", "-b", sourceBranch], { cwd: root });
+  await writeFile(path.join(root, "src.txt"), "validated in same session\n", "utf8");
+  await runCommand("git", ["add", "src.txt"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "issue implementation"], { cwd: root });
+  await runCommand("git", ["checkout", "main"], { cwd: root });
+
+  const addLabelCalls: Array<{ issueNumber: number; labels: string[] }> = [];
+  const removeLabelCalls: Array<{ issueNumber: number; labels: string[] }> = [];
+  const closeCalls: Array<{ issueNumber: number; comment?: string }> = [];
+
+  const managerFactory = (async () =>
+    ({
+      startJob: async ({ task, issueRefs }: { task: string; issueRefs?: string[] }) =>
+        ({
+          schemaVersion: 1,
+          jobId: "job-reused-session",
+          status: "completed",
+          repoPath: root,
+          repoRoot: root,
+          task,
+          issueRefs: issueRefs ?? [],
+          baseBranch: "main",
+          parallelism: 1,
+          autoResume: true,
+          maxResumesPerItem: 2,
+          planningSummary: "summary",
+          workItems: [
+            {
+              id: "issue-attempt",
+              title: "phase work",
+              prompt: task,
+              issueRefs: issueRefs ?? [],
+              dependsOn: [],
+              status: "completed",
+              attempts: 2,
+              branchName: sourceBranch,
+              lastResponse: "validated in reused session"
+            }
+          ],
+          sessions: [
+            {
+              workItemId: "issue-attempt",
+              sessionId: "session-310",
+              status: "completed",
+              attemptCount: 2,
+              branchName: sourceBranch,
+              updatedAt: nowIso()
+            }
+          ],
+          events: [],
+          mergeReadiness: { completedBranches: [], pendingBranches: [], branchReadiness: [] },
+          mergeAutomation: { targetBranch: "main", mergedBranches: [], pendingBranches: [], conflicts: [], status: "pending" },
+          remoteBranches: [],
+          pullRequests: [],
+          issueSummaries: [],
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        }) satisfies JobState
+    })) as unknown as typeof createJobManager;
+
+  const runner = new IssueRunner(root, managerFactory, {
+    snapshotter: async () => ({
+      snapshot: {
+        repoRoot: root,
+        generatedAt: nowIso(),
+        issues: [
+          {
+            id: "I_310",
+            number: 310,
+            title: "Reuse validation session",
+            body: "## Summary\nBody\n\n## Execution Metadata\n- Lane: ordered\n- Depends on: none\n- Parallel-safe: no\n\n## Done Criteria\n- done",
+            bodySummary: "Body",
+            labels: ["app-ready"],
+            assignees: [],
+            state: "OPEN",
+            updatedAt: nowIso(),
+            url: "https://example.test/issues/310",
+            executionMetadata: {
+              lane: "ordered",
+              dependsOn: [],
+              parallelSafe: false,
+              doneChecklistCount: 1,
+              doneChecklistCompletedCount: 0,
+              validationErrors: []
+            }
+          }
+        ]
+      },
+      outputPath: path.join(root, ".felixai", "state", "issues", "snapshot.json")
+    }),
+    fetchIssue: async () => ({
+      id: "I_310",
+      number: 310,
+      title: "Reuse validation session",
+      body: "## Done Criteria\n- done",
+      bodySummary: "Body",
+      labels: ["ready-to-test", "done"],
+      assignees: [],
+      state: "CLOSED",
+      updatedAt: nowIso(),
+      url: "https://example.test/issues/310",
+      executionMetadata: {
+        lane: "ordered",
+        dependsOn: [],
+        parallelSafe: false,
+        doneChecklistCount: 1,
+        doneChecklistCompletedCount: 1,
+        validationErrors: []
+      }
+    }),
+    ensureLabel: async () => {},
+    addIssueLabels: async (options) => {
+      addLabelCalls.push({ issueNumber: options.issueNumber, labels: options.labels });
+    },
+    removeIssueLabels: async (options) => {
+      removeLabelCalls.push({ issueNumber: options.issueNumber, labels: options.labels });
+    },
+    closeIssue: async (options) => {
+      closeCalls.push({ issueNumber: options.issueNumber, comment: options.comment });
+    }
+  });
+
+  const run = await runner.run({
+    repoRoot: root,
+    directive: "implement github issue #310"
+  });
+
+  assert.equal(run.status, "completed");
+  assert.equal(run.issues[0]?.status, "completed");
+  assert.deepEqual(removeLabelCalls, [{ issueNumber: 310, labels: ["ready-to-test"] }]);
+  assert.deepEqual(addLabelCalls, [{ issueNumber: 310, labels: ["done"] }]);
+  assert.equal(closeCalls.length, 1);
+  assert.equal((await readFile(path.join(root, "src.txt"), "utf8")).trim(), "validated in same session");
 }
 
 async function testIssueRunnerValidationFinalizesBranchAndArchivesSupersededJobs(): Promise<void> {
