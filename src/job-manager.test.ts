@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -4699,6 +4700,17 @@ async function testCliJobWatchResolvesRunningSessionTranscript(): Promise<void> 
 
     assert.match(output.stdout, /\[felixai\] watching WI-109-1 session=/);
     assert.match(output.stdout, /tool call shell_command/);
+    assert.match(output.stdout, /\[felixai\] watch log:/);
+
+    const watchLogPath = path.join(
+      root,
+      ".felixai",
+      "state",
+      "watch-logs",
+      `${createHash("sha1").update(path.resolve(root)).digest("hex").slice(0, 12)}-${jobId}-WI-109-1-${sessionId}.log`
+    );
+    const watchLog = await readFile(watchLogPath, "utf8");
+    assert.match(watchLog, /tool call shell_command/);
   } finally {
     if (originalUserProfile === undefined) {
       delete process.env.USERPROFILE;

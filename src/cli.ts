@@ -28,6 +28,7 @@ import { parseIssueDirectiveScope, type IssueDirectiveScope } from "./issue-dire
 import { IssuePlanner } from "./issue-planner.js";
 import { IssueRunner } from "./issue-runner.js";
 import {
+  getWatchLogPath,
   getIssueRunPath,
   loadIssueConversation,
   saveCurrentShellSession,
@@ -468,7 +469,12 @@ async function promptYesNo(question: string, rl?: ReadlineInterface): Promise<bo
   }
 }
 
-async function runSessionWatch(args: string[]): Promise<void> {
+async function runSessionWatch(
+  args: string[],
+  options?: {
+    teeFilePath?: string;
+  }
+): Promise<void> {
   const sessionId = requireValue(args[0], "Missing session id.");
   const raw = hasFlag(args, "--raw");
   const follow = !hasFlag(args, "--no-follow");
@@ -479,10 +485,13 @@ async function runSessionWatch(args: string[]): Promise<void> {
   }
 
   console.log(`[felixai] transcript: ${transcriptPath}`);
+  if (options?.teeFilePath) {
+    console.log(`[felixai] watch log: ${options.teeFilePath}`);
+  }
   if (follow) {
     console.log("[felixai] transcript mode: follow");
   }
-  await watchTranscript(transcriptPath, { raw, follow, lineCount: lines });
+  await watchTranscript(transcriptPath, { raw, follow, lineCount: lines, teeFilePath: options?.teeFilePath });
 }
 
 async function resolveJobWatchSession(jobId: string, workItemId?: string): Promise<{ workItemId: string; sessionId: string }> {
@@ -531,9 +540,14 @@ async function runJobWatch(args: string[]): Promise<void> {
   const raw = hasFlag(args, "--raw");
   const follow = !hasFlag(args, "--no-follow");
   const lines = parseNonNegativeInteger(getFlagValue(args, "--lines")) ?? 40;
+  const manager = await createJobManager();
+  const job = await manager.getJob(jobId);
   const resolved = await resolveJobWatchSession(jobId, workItemId);
+  const watchLogPath = getWatchLogPath(job.repoRoot, job.repoRoot, jobId, resolved.workItemId, resolved.sessionId);
   console.log(`[felixai] watching ${resolved.workItemId} session=${resolved.sessionId}`);
-  await runSessionWatch([resolved.sessionId, ...(raw ? ["--raw"] : []), ...(follow ? [] : ["--no-follow"]), "--lines", String(lines)]);
+  await runSessionWatch([resolved.sessionId, ...(raw ? ["--raw"] : []), ...(follow ? [] : ["--no-follow"]), "--lines", String(lines)], {
+    teeFilePath: watchLogPath
+  });
 }
 
 function describeIssueExecutionScope(scope: IssueDirectiveScope | undefined): string {

@@ -31,6 +31,22 @@ export function getCurrentShellSessionPath(projectRoot: string, repoRoot: string
   return path.join(issueStateRoot(projectRoot), `${hashRepoRoot(repoRoot)}.shell.json`);
 }
 
+export function getWatchLogPath(
+  projectRoot: string,
+  repoRoot: string,
+  jobId: string,
+  workItemId: string,
+  sessionId: string
+): string {
+  return path.join(
+    path.resolve(projectRoot),
+    ".felixai",
+    "state",
+    "watch-logs",
+    `${hashRepoRoot(repoRoot)}-${jobId}-${workItemId}-${sessionId}.log`
+  );
+}
+
 export async function saveIssueSnapshot(projectRoot: string, repoRoot: string, value: unknown): Promise<string> {
   const outputPath = getIssueSnapshotPath(projectRoot, repoRoot);
   await ensureDirectory(path.dirname(outputPath));

@@ -1,6 +1,8 @@
 import os from "node:os";
 import path from "node:path";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { appendFile, readdir, readFile, stat, writeFile } from "node:fs/promises";
+
+import { ensureDirectory } from "./fs-utils.js";
 
 function getCodexHome(): string {
   return path.join(process.env.USERPROFILE ?? os.homedir(), ".codex");
@@ -223,16 +225,30 @@ export async function watchTranscript(
     follow?: boolean;
     onLine?: (line: string) => void;
     pollIntervalMs?: number;
+    teeFilePath?: string;
   }
 ): Promise<void> {
   const lineCount = options?.lineCount ?? 40;
   const raw = options?.raw ?? false;
   const follow = options?.follow ?? true;
   const onLine = options?.onLine ?? ((line: string) => console.log(line));
+  const teeFilePath = options?.teeFilePath;
+
+  if (teeFilePath) {
+    await ensureDirectory(path.dirname(teeFilePath));
+    await writeFile(teeFilePath, "", "utf8");
+  }
+
+  const emitLine = async (line: string): Promise<void> => {
+    onLine(line);
+    if (teeFilePath) {
+      await appendFile(teeFilePath, `${line}\n`, "utf8");
+    }
+  };
 
   const initialLines = await readTranscriptTail(filePath, lineCount);
   for (const line of initialLines) {
-    onLine(raw ? line : formatTranscriptLine(line));
+    await emitLine(raw ? line : formatTranscriptLine(line));
   }
 
   if (!follow) {
@@ -255,7 +271,7 @@ export async function watchTranscript(
       .map((line) => line.trimEnd())
       .filter((line) => line.length > 0);
     for (const line of lines) {
-      onLine(raw ? line : formatTranscriptLine(line));
+      await emitLine(raw ? line : formatTranscriptLine(line));
     }
   }
 }
